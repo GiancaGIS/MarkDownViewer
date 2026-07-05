@@ -27,7 +27,7 @@ class MarkdownRenderer:
                 "noclasses": False,
             },
             "toc": {
-                "permalink": True,
+                "permalink": False,
             },
         }
 
@@ -83,6 +83,10 @@ a {{
 
 a:hover {{
   text-decoration: underline;
+}}
+
+.headerlink {{
+  display: none;
 }}
 
 pre {{
