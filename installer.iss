@@ -1,5 +1,5 @@
 #define MyAppName "Markdown Studio"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "GiancaGIS"
 #define MyAppExeName "MarkdownStudio.exe"
 #define MyAppAssocName "Markdown Studio Markdown Document"

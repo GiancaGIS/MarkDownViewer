@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 import markdown
 from pygments.formatters import HtmlFormatter
@@ -12,6 +13,13 @@ except ImportError:
 
 class MarkdownRenderer:
     """Converts Markdown text to a complete themed HTML document."""
+
+    BLOCK_TAG_RE = re.compile(r"<(h[1-6]|p|li|pre|blockquote|table)([^>]*)>", re.IGNORECASE)
+    FENCE_RE = re.compile(r"^\s*(```|~~~)")
+    HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+    LIST_RE = re.compile(r"^\s{0,3}([-+*]|\d+[.)])\s+")
+    HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+    TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
     def __init__(self, theme: str = "light") -> None:
         self.theme = theme if theme in THEMES else "light"
@@ -142,8 +150,81 @@ hr {{
   margin: 2em 0;
 }}
 
+[data-source-line] {{
+  scroll-margin-top: 10px;
+}}
+
 {pygments_css}
 """
+
+    def _source_block_lines(self, markdown_text: str) -> list[int]:
+        lines = markdown_text.splitlines()
+        anchors: list[int] = []
+        in_fence = False
+        fence_marker = ""
+
+        for index, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            fence_match = self.FENCE_RE.match(line)
+            if fence_match:
+                marker = fence_match.group(1)
+                if not in_fence:
+                    anchors.append(index)
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                continue
+
+            if in_fence:
+                continue
+
+            previous_blank = index == 1 or not lines[index - 2].strip()
+            next_line = lines[index].strip() if index < len(lines) else ""
+            is_table_header = "|" in line and bool(self.TABLE_SEPARATOR_RE.match(next_line))
+            is_table_separator = bool(self.TABLE_SEPARATOR_RE.match(line))
+            is_structural = any(
+                (
+                    self.HEADING_RE.match(line),
+                    self.LIST_RE.match(line),
+                    line.lstrip().startswith(">"),
+                    self.HR_RE.match(line),
+                    is_table_header,
+                )
+            )
+
+            if is_table_separator:
+                continue
+            if previous_blank or is_structural:
+                anchors.append(index)
+
+        return anchors or [1]
+
+    def _annotate_source_lines(self, html_body: str, source_lines: list[int]) -> str:
+        line_iter = iter(source_lines)
+
+        def replace(match: re.Match[str]) -> str:
+            tag = match.group(1)
+            attrs = match.group(2) or ""
+            if "data-source-line" in attrs:
+                return match.group(0)
+            try:
+                line_number = next(line_iter)
+            except StopIteration:
+                return match.group(0)
+
+            slash = ""
+            clean_attrs = attrs.rstrip()
+            if clean_attrs.endswith("/"):
+                slash = " /"
+                clean_attrs = clean_attrs[:-1].rstrip()
+            return f'<{tag}{clean_attrs} data-source-line="{line_number}"{slash}>'
+
+        return self.BLOCK_TAG_RE.sub(replace, html_body)
 
     def to_html_document(self, markdown_text: str, title: str = APP_NAME) -> str:
         body = markdown.markdown(
@@ -152,6 +233,7 @@ hr {{
             extension_configs=self.extension_configs,
             output_format="html5",
         )
+        body = self._annotate_source_lines(body, self._source_block_lines(markdown_text))
         safe_title = html.escape(title or APP_NAME)
         return f"""<!doctype html>
 <html lang="it">

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, QSize, QTimer, QUrl, Qt
+from PyQt6.QtCore import QEvent, QSettings, QSize, QTimer, QUrl, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QTextCursor, QTextDocument
 from PyQt6.QtWidgets import QApplication, QCheckBox, QFileDialog, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QStatusBar, QStyle, QTabWidget, QToolBar, QVBoxLayout, QWidget
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -46,6 +47,8 @@ class MainWindow(QMainWindow):
         self._loading = False
         self._last_find_text = ""
         self._pending_pdf_path: Path | None = None
+        self._syncing_preview_from_editor = False
+        self._syncing_editor_from_preview = False
 
         self.renderer = MarkdownRenderer(self.theme)
 
@@ -55,11 +58,12 @@ class MainWindow(QMainWindow):
         self.preview = QWebEngineView()
         self.preview.setPage(LinkInterceptorPage(self.preview))
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.preview.installEventFilter(self)
         try:
             self.preview.page().pdfPrintingFinished.connect(self.on_pdf_printing_finished)
         except Exception:
             pass
-        self.preview.loadFinished.connect(lambda _ok: self.schedule_preview_scroll_sync())
+        self.preview.loadFinished.connect(self.on_preview_load_finished)
 
         self.find_box = QLineEdit()
         self.find_box.setPlaceholderText("Trova nel testo...")
@@ -80,6 +84,11 @@ class MainWindow(QMainWindow):
         self.preview_scroll_timer.setSingleShot(True)
         self.preview_scroll_timer.setInterval(35)
         self.preview_scroll_timer.timeout.connect(self.sync_preview_scroll)
+
+        self.editor_scroll_timer = QTimer(self)
+        self.editor_scroll_timer.setSingleShot(True)
+        self.editor_scroll_timer.setInterval(80)
+        self.editor_scroll_timer.timeout.connect(self.sync_editor_scroll_from_preview)
 
         self.document_tabs = QTabWidget()
         self.document_tabs.setTabsClosable(True)
@@ -105,6 +114,28 @@ class MainWindow(QMainWindow):
 
     def tr(self, key: str, **kwargs) -> str:
         return translate(self.language, key, **kwargs)
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        is_preview_widget = watched is self.preview or (
+            hasattr(self, "preview") and isinstance(watched, QWidget) and self.preview.isAncestorOf(watched)
+        )
+        if is_preview_widget and self.sync_preview_scroll_enabled:
+            if event.type() in {
+                QEvent.Type.Wheel,
+                QEvent.Type.KeyRelease,
+                QEvent.Type.MouseButtonRelease,
+            }:
+                self.schedule_editor_scroll_sync_from_preview()
+        return super().eventFilter(watched, event)
+
+    def on_preview_load_finished(self, _ok: bool) -> None:
+        self.install_preview_event_filters()
+        self.schedule_preview_scroll_sync()
+
+    def install_preview_event_filters(self) -> None:
+        self.preview.installEventFilter(self)
+        for child in self.preview.findChildren(QWidget):
+            child.installEventFilter(self)
 
     @property
     def editor(self) -> MarkdownEditor:
@@ -983,17 +1014,27 @@ class MainWindow(QMainWindow):
         self.schedule_preview_scroll_sync()
 
     def schedule_preview_scroll_sync(self) -> None:
-        if self.sync_preview_scroll_enabled:
+        if self.sync_preview_scroll_enabled and not self._syncing_editor_from_preview:
             self.preview_scroll_timer.start()
+
+    def schedule_editor_scroll_sync_from_preview(self) -> None:
+        if self.sync_preview_scroll_enabled and not self._syncing_preview_from_editor:
+            self.editor_scroll_timer.start()
 
     def sync_preview_scroll(self) -> None:
         if not self.sync_preview_scroll_enabled:
             return
 
-        scrollbar = self.editor.verticalScrollBar()
-        maximum = scrollbar.maximum()
-        ratio = 0.0 if maximum <= 0 else scrollbar.value() / maximum
-        ratio = max(0.0, min(1.0, ratio))
+        text_lines = self.editor.toPlainText().splitlines() or [""]
+        total_lines = len(text_lines)
+        top_line = max(1, min(total_lines, self.editor.firstVisibleBlock().blockNumber() + 1))
+        line_ratio = 0.0 if total_lines <= 1 else (top_line - 1) / (total_lines - 1)
+        payload = {
+            "line": top_line,
+            "totalLines": total_lines,
+            "ratio": max(0.0, min(1.0, line_ratio)),
+        }
+
         script = f"""
 (() => {{
   const doc = document.documentElement;
@@ -1003,13 +1044,145 @@ class MainWindow(QMainWindow):
     body ? body.scrollHeight : 0
   );
   const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
-  window.scrollTo(0, maxScroll * {ratio:.8f});
+  const payload = {json.dumps(payload)};
+
+  const anchors = Array.from(document.querySelectorAll("[data-source-line]"))
+    .map((element) => {{
+      const line = Number(element.getAttribute("data-source-line"));
+      return {{
+        line,
+        y: element.getBoundingClientRect().top + window.scrollY,
+      }};
+    }})
+    .filter((anchor) => Number.isFinite(anchor.line) && Number.isFinite(anchor.y))
+    .sort((a, b) => a.line - b.line || a.y - b.y);
+
+  if (anchors.length) {{
+    const sourceLine = Math.max(1, Math.min(payload.totalLines || 1, payload.line || 1));
+    let previous = {{ line: 1, y: 0 }};
+    let next = {{ line: payload.totalLines || sourceLine, y: maxScroll }};
+
+    for (const anchor of anchors) {{
+      if (anchor.line <= sourceLine) {{
+        previous = anchor;
+      }} else {{
+        next = anchor;
+        break;
+      }}
+    }}
+
+    if (sourceLine <= anchors[0].line) {{
+      previous = {{ line: 1, y: 0 }};
+      next = anchors[0];
+    }} else if (sourceLine >= anchors[anchors.length - 1].line) {{
+      previous = anchors[anchors.length - 1];
+      next = {{ line: payload.totalLines || previous.line, y: maxScroll }};
+    }}
+
+    const lineSpan = Math.max(1, next.line - previous.line);
+    const progress = Math.max(0, Math.min(1, (sourceLine - previous.line) / lineSpan));
+    const target = previous.y + (next.y - previous.y) * progress;
+    window.scrollTo(0, Math.max(0, Math.min(maxScroll, target)));
+    return;
+  }}
+
+  window.scrollTo(0, maxScroll * (payload.ratio || 0));
 }})();
 """
         try:
+            self._syncing_preview_from_editor = True
             self.preview.page().runJavaScript(script)
+            QTimer.singleShot(120, lambda: setattr(self, "_syncing_preview_from_editor", False))
+        except RuntimeError:
+            self._syncing_preview_from_editor = False
+            pass
+
+    def sync_editor_scroll_from_preview(self) -> None:
+        if not self.sync_preview_scroll_enabled or self._syncing_preview_from_editor:
+            return
+
+        script = """
+(() => {
+  const doc = document.documentElement;
+  const body = document.body;
+  const scrollTop = window.scrollY || (doc ? doc.scrollTop : 0) || (body ? body.scrollTop : 0) || 0;
+  const scrollHeight = Math.max(
+    doc ? doc.scrollHeight : 0,
+    body ? body.scrollHeight : 0
+  );
+  const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
+  const ratio = maxScroll <= 0 ? 0 : Math.max(0, Math.min(1, scrollTop / maxScroll));
+  const anchors = Array.from(document.querySelectorAll("[data-source-line]"))
+    .map((element) => {
+      const line = Number(element.getAttribute("data-source-line"));
+      return {
+        line,
+        y: element.getBoundingClientRect().top + window.scrollY,
+      };
+    })
+    .filter((anchor) => Number.isFinite(anchor.line) && Number.isFinite(anchor.y))
+    .sort((a, b) => a.line - b.line || a.y - b.y);
+
+  if (!anchors.length) {
+    return { mode: "ratio", ratio };
+  }
+
+  const viewportLine = scrollTop + 10;
+  let previous = { line: 1, y: 0 };
+  let next = null;
+  for (const anchor of anchors) {
+    if (anchor.y <= viewportLine) {
+      previous = anchor;
+    } else {
+      next = anchor;
+      break;
+    }
+  }
+  if (!next) {
+    next = { line: null, y: maxScroll };
+  }
+
+  const span = Math.max(1, next.y - previous.y);
+  const progress = Math.max(0, Math.min(1, (viewportLine - previous.y) / span));
+  return {
+    mode: "sourceLines",
+    previousLine: previous.line,
+    nextLine: next.line,
+    progress,
+    ratio,
+  };
+})();
+"""
+
+        try:
+            self.preview.page().runJavaScript(script, self.apply_preview_scroll_to_editor)
         except RuntimeError:
             pass
+
+    def apply_preview_scroll_to_editor(self, payload) -> None:
+        if not self.sync_preview_scroll_enabled or not isinstance(payload, dict):
+            return
+
+        text_lines = self.editor.toPlainText().splitlines() or [""]
+        total_lines = len(text_lines)
+
+        if payload.get("mode") == "sourceLines":
+            previous_line = int(payload.get("previousLine", 1) or 1)
+            next_line_value = payload.get("nextLine")
+            next_line = int(next_line_value) if next_line_value else total_lines
+            previous_line = max(1, min(total_lines, previous_line))
+            next_line = max(previous_line, min(total_lines, next_line))
+            progress = float(payload.get("progress", 0.0) or 0.0)
+            target_line = round(previous_line + (next_line - previous_line) * max(0.0, min(1.0, progress)))
+        else:
+            ratio = float(payload.get("ratio", 0.0) or 0.0)
+            target_line = round(1 + (total_lines - 1) * max(0.0, min(1.0, ratio)))
+
+        scrollbar = self.editor.verticalScrollBar()
+        target_value = max(0, min(scrollbar.maximum(), target_line - 1))
+        self._syncing_editor_from_preview = True
+        scrollbar.setValue(target_value)
+        QTimer.singleShot(120, lambda: setattr(self, "_syncing_editor_from_preview", False))
 
     def update_outline(self) -> None:
         headings: list[tuple[int, str, int]] = []

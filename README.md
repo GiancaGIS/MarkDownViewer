@@ -9,7 +9,7 @@ Markdown Studio is a desktop Markdown editor built with Python and PyQt6. It is 
 - Multi-tab Markdown editor for working on several documents at once
 - Line numbers and lightweight Markdown syntax highlighting
 - Live HTML preview powered by `QWebEngineView`
-- Synchronized editor-to-preview scrolling
+- Bidirectional synchronized scrolling between editor and preview
 - Light and dark themes
 - Italian and English interface language
 - Workspace sidebar with file tree, recent documents, global search, and document outline
