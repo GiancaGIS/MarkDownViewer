@@ -15,6 +15,7 @@ Markdown Studio is a desktop Markdown editor built with Python and PyQt6. It is 
 - Workspace sidebar with file tree, recent documents, global search, and document outline
 - Case-sensitive workspace search across `.md`, `.markdown`, `.mdown`, `.mkd`, and `.txt` files
 - Quick Markdown tools for bold, italic, inline code, code blocks, links, images, tables, lists, headings, and quotes
+- Mermaid diagram preview for fenced `mermaid` blocks
 - Drag and drop images into the editor, with automatic copy into a local `assets/` folder
 - Autosave for documents that have already been opened or saved
 - HTML export
@@ -108,6 +109,22 @@ If the document has not been saved yet, the app asks where to save it first. The
 ![alt](assets/file.png)
 ```
 
+## Mermaid Diagrams
+
+Markdown Studio renders Mermaid diagrams in the live preview, HTML export, and PDF export.
+
+Use a fenced code block with the `mermaid` language:
+
+````md
+```mermaid
+flowchart LR
+  A[Write Markdown] --> B[Preview]
+  B --> C[Export]
+```
+````
+
+Mermaid is loaded in the rendered HTML through the jsDelivr CDN, so diagram rendering requires network access when previewing or opening exported HTML files.
+
 ## Export
 
 Markdown Studio can export the current document as:
@@ -162,7 +179,14 @@ The script:
 2. installs dependencies, PyInstaller, and required packages;
 3. generates `dist\MarkdownStudio\MarkdownStudio.exe`;
 4. compiles [installer.iss](installer.iss) with Inno Setup;
-5. produces `installer\MarkdownStudioSetup-0.4.0.exe`.
+5. produces `installer\MarkdownStudioSetup-<version>.exe`.
+
+The installer displays the [MIT License](LICENSE) during setup and copies the `LICENSE` file into the application installation directory.
+
+At setup startup, the installer lets you choose the installation scope:
+
+- all users: installs under `C:\Program Files`;
+- current user only: installs under the current user's profile.
 
 During installation, there is an option to associate Markdown files with Markdown Studio:
 
@@ -171,7 +195,7 @@ During installation, there is an option to associate Markdown files with Markdow
 - `.mdown`
 - `.mkd`
 
-The association is per-user and opens the selected file directly in the app.
+The association follows the selected installation scope and opens the selected file directly in the app.
 
 The application icon is located at `assets\app_icon.ico`; it is embedded in the PyInstaller executable, used by the Inno Setup installer, and also applied to the Qt window when the app is launched from source.
 
@@ -208,7 +232,6 @@ The application icon is located at `assets\app_icon.ico`; it is embedded in the 
 
 - Indexed search with SQLite FTS5
 - Backlinks between notes with `[[Note]]` syntax
-- Mermaid preview for diagrams
 
 ## License
 

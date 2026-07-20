@@ -2,7 +2,7 @@ from __future__ import annotations
 
 APP_NAME = "Markdown Studio"
 ORG_NAME = "GiancaGIS"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd", ".txt"}
 MAX_RECENT_FILES = 14

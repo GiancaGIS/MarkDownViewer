@@ -20,6 +20,7 @@ class MarkdownRenderer:
     LIST_RE = re.compile(r"^\s{0,3}([-+*]|\d+[.)])\s+")
     HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
     TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    MERMAID_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*mermaid\s*$", re.IGNORECASE)
 
     def __init__(self, theme: str = "light") -> None:
         self.theme = theme if theme in THEMES else "light"
@@ -101,6 +102,19 @@ pre {{
   padding: 16px 18px;
   border-radius: 10px;
   overflow-x: auto;
+}}
+
+pre.mermaid {{
+  background: {t['preview_inline_code_bg']};
+  color: {t['preview_fg']};
+  border: 1px solid {t['preview_border']};
+  text-align: center;
+  white-space: pre-wrap;
+}}
+
+pre.mermaid svg {{
+  max-width: 100%;
+  height: auto;
 }}
 
 code {{
@@ -211,6 +225,12 @@ hr {{
             tag = match.group(1)
             attrs = match.group(2) or ""
             if "data-source-line" in attrs:
+                existing_match = re.search(r"data-source-line=[\"'](\d+)[\"']", attrs)
+                if existing_match:
+                    existing_line = int(existing_match.group(1))
+                    for source_line in line_iter:
+                        if source_line >= existing_line:
+                            break
                 return match.group(0)
             try:
                 line_number = next(line_iter)
@@ -226,7 +246,94 @@ hr {{
 
         return self.BLOCK_TAG_RE.sub(replace, html_body)
 
+    def _extract_mermaid_blocks(self, markdown_text: str) -> str:
+        lines = markdown_text.splitlines()
+        output: list[str] = []
+        index = 0
+
+        while index < len(lines):
+            line = lines[index]
+            start_match = self.MERMAID_FENCE_RE.match(line)
+            if not start_match:
+                output.append(line)
+                index += 1
+                continue
+
+            start_line = index + 1
+            fence = start_match.group(1)
+            fence_char = fence[0]
+            fence_length = len(fence)
+            closing_re = re.compile(rf"^\s{{0,3}}{re.escape(fence_char)}{{{fence_length},}}\s*$")
+            diagram_lines: list[str] = []
+            index += 1
+
+            while index < len(lines) and not closing_re.match(lines[index]):
+                diagram_lines.append(lines[index])
+                index += 1
+
+            if index < len(lines):
+                index += 1
+
+            diagram = html.escape("\n".join(diagram_lines))
+            output.extend(
+                [
+                    f'<pre class="mermaid" data-source-line="{start_line}">',
+                    diagram,
+                    "</pre>",
+                ]
+            )
+
+        return "\n".join(output)
+
+    def _mermaid_scripts(self) -> str:
+        theme = "dark" if self.theme == "dark" else "default"
+        return f"""
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+  (() => {{
+    const diagrams = Array.from(document.querySelectorAll("pre.mermaid"));
+    window.markdownStudioMermaidReady = diagrams.length === 0;
+    window.markdownStudioMermaidSuccess = diagrams.length === 0;
+
+    const finish = (success) => {{
+      window.markdownStudioMermaidReady = true;
+      window.markdownStudioMermaidSuccess = Boolean(success);
+    }};
+
+    const render = async () => {{
+      if (!diagrams.length) {{
+        finish(true);
+        return;
+      }}
+      if (!window.mermaid) {{
+        finish(false);
+        return;
+      }}
+      try {{
+        window.mermaid.initialize({{
+          startOnLoad: false,
+          securityLevel: "loose",
+          theme: "{theme}",
+        }});
+        await window.mermaid.run({{ nodes: diagrams }});
+        finish(true);
+      }} catch (error) {{
+        document.body.dataset.mermaidError = error && error.message ? error.message : String(error);
+        finish(false);
+      }}
+    }};
+
+    if (document.readyState === "loading") {{
+      document.addEventListener("DOMContentLoaded", render, {{ once: true }});
+    }} else {{
+      render();
+    }}
+  }})();
+  </script>
+"""
+
     def to_html_document(self, markdown_text: str, title: str = APP_NAME) -> str:
+        markdown_text = self._extract_mermaid_blocks(markdown_text)
         body = markdown.markdown(
             markdown_text,
             extensions=self.extensions,
@@ -247,5 +354,6 @@ hr {{
   <main class="page">
 {body}
   </main>
+{self._mermaid_scripts()}
 </body>
 </html>"""

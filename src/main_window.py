@@ -9,6 +9,7 @@ from pathlib import Path
 from PyQt6.QtCore import QEvent, QSettings, QSize, QTimer, QUrl, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QTextCursor, QTextDocument
 from PyQt6.QtWidgets import QApplication, QCheckBox, QFileDialog, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QStatusBar, QStyle, QTabWidget, QToolBar, QVBoxLayout, QWidget
+from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 try:
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self._loading = False
         self._last_find_text = ""
         self._pending_pdf_path: Path | None = None
+        self._pending_pdf_retries = 0
         self._syncing_preview_from_editor = False
         self._syncing_editor_from_preview = False
 
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
 
         self.preview = QWebEngineView()
         self.preview.setPage(LinkInterceptorPage(self.preview))
+        self.preview.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.preview.installEventFilter(self)
         try:
@@ -131,6 +134,9 @@ class MainWindow(QMainWindow):
     def on_preview_load_finished(self, _ok: bool) -> None:
         self.install_preview_event_filters()
         self.schedule_preview_scroll_sync()
+        if self._pending_pdf_path:
+            self._pending_pdf_retries = 0
+            self.wait_for_preview_before_pdf()
 
     def install_preview_event_filters(self) -> None:
         self.preview.installEventFilter(self)
@@ -857,9 +863,37 @@ class MainWindow(QMainWindow):
 
         self._pending_pdf_path = path
         self.update_preview()
+        self.statusBar().showMessage(self.tr("pdf_generation", name=path.name), 3500)
+
+    def wait_for_preview_before_pdf(self) -> None:
+        if not self._pending_pdf_path:
+            return
+
+        script = """
+(() => {
+  const hasMermaid = Boolean(document.querySelector("pre.mermaid, .mermaid[data-processed='true']"));
+  return !hasMermaid || Boolean(window.markdownStudioMermaidReady);
+})();
+"""
+        try:
+            self.preview.page().runJavaScript(script, self.print_pending_pdf_if_ready)
+        except RuntimeError:
+            self.print_pending_pdf_if_ready(True)
+
+    def print_pending_pdf_if_ready(self, ready) -> None:
+        path = self._pending_pdf_path
+        if not path:
+            return
+
+        if not ready and self._pending_pdf_retries < 50:
+            self._pending_pdf_retries += 1
+            QTimer.singleShot(100, self.wait_for_preview_before_pdf)
+            return
+
+        self._pending_pdf_path = None
+        self._pending_pdf_retries = 0
         try:
             self.preview.page().printToPdf(str(path))
-            self.statusBar().showMessage(self.tr("pdf_generation", name=path.name), 3500)
         except Exception as exc:
             QMessageBox.critical(self, self.tr("export_pdf_error"), self.tr("export_pdf_error_body", error=exc))
 

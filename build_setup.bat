@@ -77,6 +77,6 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo Build completata.
-echo Installer generato in: installer\MarkdownStudioSetup_setup.exe
+echo Installer generato in: installer\MarkdownStudioSetup-*.exe
 echo.
 exit /b 0
