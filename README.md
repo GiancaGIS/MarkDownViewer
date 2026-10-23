@@ -286,13 +286,21 @@ Scroll regression checks cover source ranges after nested blocks and fences, wra
 <details>
 <summary><strong>Build the Windows installer</strong></summary>
 
-Install Python with `py -3` available, and Inno Setup 6 with `ISCC.exe` on `PATH` or in its standard Program Files location. Then run:
+Install Python with `py -3` available, and Inno Setup 6. The build finds `ISCC.exe` on `PATH`, in the standard Program Files locations, or under the current user's `LocalAppData\Programs`. You can also set `ISCC` to the compiler's full path. Then run:
 
 ```bat
 build_setup.bat
 ```
 
-The script prepares `.venv`, installs build dependencies, packages `dist\MarkdownStudio\MarkdownStudio.exe` with PyInstaller, and compiles [installer.iss](installer.iss). The installer is written to `installer\MarkdownStudioSetup-<version>.exe`.
+The launcher prepares `.venv` and runs [tools/build_setup.py](tools/build_setup.py). It checks Inno Setup and version consistency first, installs dependencies, packages `dist\MarkdownStudio\MarkdownStudio.exe` using the tracked [MarkdownStudio.spec](MarkdownStudio.spec), and compiles [installer.iss](installer.iss). The installer is written to `installer\MarkdownStudioSetup-<version>.exe`.
+
+Progress stays visible and a complete log is saved to `build\setup.log`. The launcher pauses on both success and failure, so an error remains readable when started by double-click. It preserves other files in `build`, `dist`, and `installer`; PyInstaller replaces its own application package. Close a running packaged app before rebuilding it.
+
+For automation, or to reuse dependencies that are already installed without contacting pip, run:
+
+```bat
+build_setup.bat --no-pause --skip-install
+```
 
 Setup includes the MIT license and supports installation for all users under `C:\Program Files` or for the current user. Optional file associations cover `.md`, `.markdown`, `.mdown`, and `.mkd`, and follow the selected installation scope.
 

@@ -19,6 +19,7 @@
 - Added an actionable update toast with a release link, dismissal, and automatic expiration.
 - Added Help → About with the application version, author, and copyright in Italian and English.
 - Aligned application and Windows installer versions to 1.1.0.
+- Hardened the Windows build launcher with compiler/version preflight, a persistent live log, readable failures, offline dependency reuse, and packaging from the tracked spec without deleting all previous build outputs.
 
 ## 1.0.3
 

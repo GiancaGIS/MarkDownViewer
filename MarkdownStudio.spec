@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets\\app_icon.ico', 'assets')]
+datas = [('assets/app_icon.ico', 'assets')]
 binaries = []
 hiddenimports = ['markdown.extensions.extra', 'markdown.extensions.toc', 'markdown.extensions.sane_lists', 'markdown.extensions.codehilite']
 tmp_ret = collect_all('PyQt6')
@@ -9,7 +9,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['src\\app.py'],
+    ['src/app.py'],
     pathex=['src'],
     binaries=binaries,
     datas=datas,
@@ -39,7 +39,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\app_icon.ico'],
+    icon=['assets/app_icon.ico'],
 )
 coll = COLLECT(
     exe,
