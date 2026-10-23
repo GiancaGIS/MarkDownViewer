@@ -8,22 +8,21 @@ from pygments.formatters import HtmlFormatter
 
 try:
     from .config import APP_NAME, THEMES
+    from .preferences import Typography
+    from .source_map import SourceMap
 except ImportError:
     from config import APP_NAME, THEMES
+    from preferences import Typography
+    from source_map import SourceMap
 
 class MarkdownRenderer:
     """Converts Markdown text to a complete themed HTML document."""
 
-    BLOCK_TAG_RE = re.compile(r"<(h[1-6]|p|li|pre|blockquote|table)([^>]*)>", re.IGNORECASE)
-    FENCE_RE = re.compile(r"^\s*(```|~~~)")
-    HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
-    LIST_RE = re.compile(r"^\s{0,3}([-+*]|\d+[.)])\s+")
-    HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
-    TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
     MERMAID_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*mermaid\s*$", re.IGNORECASE)
 
     def __init__(self, theme: str = "light") -> None:
         self.theme = theme if theme in THEMES else "light"
+        self.typography = Typography()
         self.extensions = [
             "extra",
             "toc",
@@ -45,6 +44,9 @@ class MarkdownRenderer:
 
     def _css(self) -> str:
         t = THEMES[self.theme]
+        typography = self.typography
+        # Escape font names as CSS strings, including HTML-significant characters.
+        font = "".join(f"\\{ord(char):x} " if char in '\\"<>\n\r' else char for char in typography.preview_font)
         try:
             pygments_css = HtmlFormatter(style=t["pygments"]).get_style_defs(".codehilite")
         except Exception:
@@ -60,18 +62,19 @@ body {{
   padding: 0;
   background: {t['preview_bg']};
   color: {t['preview_fg']};
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-  line-height: 1.62;
+  font-family: "{font}", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  font-size: {typography.preview_size}px;
+  line-height: {typography.preview_spacing};
 }}
 
 .page {{
-  max-width: 980px;
+  max-width: {typography.preview_width}px;
   margin: 0 auto;
-  padding: 36px 44px 72px;
+  padding: 28px 32px 56px;
   background: {t['preview_page']};
   min-height: 100vh;
   box-sizing: border-box;
-  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.16);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
 }}
 
 h1, h2, h3, h4, h5, h6 {{
@@ -80,13 +83,17 @@ h1, h2, h3, h4, h5, h6 {{
   margin-bottom: 0.55em;
 }}
 
+.page > :first-child {{
+  margin-top: 0;
+}}
+
 h1 {{
   border-bottom: 1px solid {t['preview_border']};
   padding-bottom: 0.25em;
 }}
 
 a {{
-  color: #58a6ff;
+  color: {"#58a6ff" if self.theme == "dark" else "#0969da"};
   text-decoration: none;
 }}
 
@@ -168,83 +175,12 @@ hr {{
   scroll-margin-top: 10px;
 }}
 
+@media (max-width: 600px) {{
+  .page {{ padding: 24px 24px 48px; }}
+}}
+
 {pygments_css}
 """
-
-    def _source_block_lines(self, markdown_text: str) -> list[int]:
-        lines = markdown_text.splitlines()
-        anchors: list[int] = []
-        in_fence = False
-        fence_marker = ""
-
-        for index, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-
-            fence_match = self.FENCE_RE.match(line)
-            if fence_match:
-                marker = fence_match.group(1)
-                if not in_fence:
-                    anchors.append(index)
-                    in_fence = True
-                    fence_marker = marker
-                elif marker == fence_marker:
-                    in_fence = False
-                    fence_marker = ""
-                continue
-
-            if in_fence:
-                continue
-
-            previous_blank = index == 1 or not lines[index - 2].strip()
-            next_line = lines[index].strip() if index < len(lines) else ""
-            is_table_header = "|" in line and bool(self.TABLE_SEPARATOR_RE.match(next_line))
-            is_table_separator = bool(self.TABLE_SEPARATOR_RE.match(line))
-            is_structural = any(
-                (
-                    self.HEADING_RE.match(line),
-                    self.LIST_RE.match(line),
-                    line.lstrip().startswith(">"),
-                    self.HR_RE.match(line),
-                    is_table_header,
-                )
-            )
-
-            if is_table_separator:
-                continue
-            if previous_blank or is_structural:
-                anchors.append(index)
-
-        return anchors or [1]
-
-    def _annotate_source_lines(self, html_body: str, source_lines: list[int]) -> str:
-        line_iter = iter(source_lines)
-
-        def replace(match: re.Match[str]) -> str:
-            tag = match.group(1)
-            attrs = match.group(2) or ""
-            if "data-source-line" in attrs:
-                existing_match = re.search(r"data-source-line=[\"'](\d+)[\"']", attrs)
-                if existing_match:
-                    existing_line = int(existing_match.group(1))
-                    for source_line in line_iter:
-                        if source_line >= existing_line:
-                            break
-                return match.group(0)
-            try:
-                line_number = next(line_iter)
-            except StopIteration:
-                return match.group(0)
-
-            slash = ""
-            clean_attrs = attrs.rstrip()
-            if clean_attrs.endswith("/"):
-                slash = " /"
-                clean_attrs = clean_attrs[:-1].rstrip()
-            return f'<{tag}{clean_attrs} data-source-line="{line_number}"{slash}>'
-
-        return self.BLOCK_TAG_RE.sub(replace, html_body)
 
     def _extract_mermaid_blocks(self, markdown_text: str) -> str:
         lines = markdown_text.splitlines()
@@ -336,11 +272,10 @@ hr {{
         markdown_text = self._extract_mermaid_blocks(markdown_text)
         body = markdown.markdown(
             markdown_text,
-            extensions=self.extensions,
+            extensions=[*self.extensions, SourceMap(markdown_text)],
             extension_configs=self.extension_configs,
             output_format="html5",
         )
-        body = self._annotate_source_lines(body, self._source_block_lines(markdown_text))
         safe_title = html.escape(title or APP_NAME)
         return f"""<!doctype html>
 <html lang="it">
@@ -354,6 +289,62 @@ hr {{
   <main class="page">
 {body}
   </main>
-{self._mermaid_scripts()}
+{self._mermaid_scripts() if 'class="mermaid"' in body else ''}
 </body>
 </html>"""
+
+    def to_pdf_document(self, markdown_text: str, title: str, options) -> str:
+        """Produce a light, paginated document independently of screen styling."""
+        renderer = MarkdownRenderer("light")
+        document = renderer.to_html_document(markdown_text, title)
+
+        def css_string(value: str) -> str:
+            return "".join(f"\\{ord(char):x} " if char in '\\"<>\n\r' else char for char in value)
+
+        footer = ""
+        if options.page_numbers:
+            footer = f"""
+  @bottom-left {{ content: "{css_string(title[:70])}"; font: 8pt "{css_string(options.font)}", sans-serif; color: #667085; }}
+  @bottom-right {{ content: counter(page) " / " counter(pages); font: 8pt "{css_string(options.font)}", sans-serif; color: #667085; }}
+"""
+        height = options.page_layout().paintRect().height()
+        print_css = f"""
+@page {{
+  size: {options.paper} {"landscape" if options.landscape else "portrait"};
+  margin: {options.top}mm {options.right}mm {options.bottom}mm {options.left}mm;
+  {footer}
+}}
+:root {{ color-scheme: light; }}
+html, body {{ background: white; color: #202630; }}
+body {{ font-family: "{css_string(options.font)}", Arial, sans-serif; font-size: {options.font_size}pt; line-height: {options.line_height}; }}
+.page {{ width: auto; max-width: none; min-height: 0; margin: 0; padding: 0; background: white; box-shadow: none; }}
+h1, h2, h3, h4, h5, h6 {{ break-after: avoid; page-break-after: avoid; line-height: 1.2; color: #152536; }}
+h1 {{ font-size: 24pt; margin: 0 0 14pt; padding-bottom: 9pt; border-bottom: 1pt solid #d8e0e8; }}
+h2 {{ font-size: 17pt; margin: 20pt 0 8pt; }}
+h3 {{ font-size: 13pt; margin: 15pt 0 6pt; }}
+h4, h5, h6 {{ font-size: 11pt; margin: 12pt 0 5pt; }}
+p {{ margin: 0 0 8pt; orphans: 3; widows: 3; }}
+ul, ol {{ padding-left: 18pt; margin: 6pt 0 10pt; }}
+li {{ margin-bottom: 3pt; orphans: 2; widows: 2; }}
+a {{ color: #175ea8; overflow-wrap: anywhere; }}
+table {{ width: 100%; table-layout: auto; border-collapse: collapse; margin: 12pt 0; font-size: .92em; break-inside: auto; }}
+thead {{ display: table-header-group; }}
+tfoot {{ display: table-footer-group; }}
+tr {{ break-inside: avoid; page-break-inside: avoid; }}
+th, td {{ border: .5pt solid #d6dee7; padding: 5pt 7pt; overflow-wrap: break-word; vertical-align: top; }}
+td a, td code {{ overflow-wrap: anywhere; }}
+th {{ color: #26384b; background: #eef3f8; font-weight: 600; }}
+blockquote {{ color: #475569; background: #f5f7fa; border-left: 2pt solid #98adc5; margin: 10pt 0; padding: 7pt 11pt; orphans: 3; widows: 3; }}
+blockquote p:last-child {{ margin-bottom: 0; }}
+pre {{ font-family: "Consolas", "DejaVu Sans Mono", monospace; font-size: 9pt; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow: visible; padding: 9pt 11pt; border: .5pt solid #dce3ec; border-radius: 4pt; background: #f6f8fa; break-inside: auto; page-break-inside: auto; orphans: 3; widows: 3; }}
+code {{ font-family: "Consolas", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: .85em; }}
+pre code {{ font-size: 9pt; line-height: 1.4; }}
+p code, li code, td code {{ background: #eef2f6; color: #27364a; }}
+img, svg {{ max-width: 100%; max-height: {max(50, height - 12)}mm; object-fit: contain; break-inside: avoid; page-break-inside: avoid; }}
+p:has(> img:only-child), pre.mermaid {{ break-inside: avoid; page-break-inside: avoid; }}
+pre.mermaid {{ background: white; border: 0; padding: 6pt 0; }}
+pre.mermaid svg {{ max-height: {max(50, height - 12)}mm; }}
+.page-break {{ break-before: page; page-break-before: always; height: 0; }}
+* {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+"""
+        return document.replace("</style>", print_css + "\n</style>", 1)

@@ -3,14 +3,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 try:
-    from .config import APP_NAME, ORG_NAME
+    from .config import APP_NAME, ORG_NAME, VERSION
     from .main_window import MainWindow
 except ImportError:
-    from config import APP_NAME, ORG_NAME
+    from config import APP_NAME, ORG_NAME, VERSION
     from main_window import MainWindow
 
 
@@ -30,6 +31,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
+    app.setApplicationVersion(VERSION)
     icon_path = app_icon_path()
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
@@ -42,6 +44,7 @@ def main() -> int:
         initial_path = Path(sys.argv[1])
         if initial_path.exists() and initial_path.is_file():
             window.open_file_path(initial_path)
+    QTimer.singleShot(1200, window.check_startup_updates)
     return app.exec()
 
 

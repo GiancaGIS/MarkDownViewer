@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRegularExpression, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QTextCharFormat, QTextFormat, QTextCursor, QSyntaxHighlighter
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter, QTextCharFormat, QTextFormat, QTextCursor, QSyntaxHighlighter
 from PyQt6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
 
 try:
@@ -35,7 +35,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
     def _build_formats(self) -> None:
         if self.theme == "dark":
-            self.header_fmt = self._format("#79c0ff", bold=True, size_delta=1)
+            self.header_fmt = self._format("#79c0ff", bold=True)
             self.marker_fmt = self._format("#8b949e", bold=True)
             self.bold_fmt = self._format("#ffa657", bold=True)
             self.italic_fmt = self._format("#d2a8ff", italic=True)
@@ -45,7 +45,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             self.list_fmt = self._format("#ff7b72", bold=True)
             self.hr_fmt = self._format("#8b949e")
         else:
-            self.header_fmt = self._format("#0969da", bold=True, size_delta=1)
+            self.header_fmt = self._format("#0969da", bold=True)
             self.marker_fmt = self._format("#6e7781", bold=True)
             self.bold_fmt = self._format("#953800", bold=True)
             self.italic_fmt = self._format("#8250df", italic=True)
@@ -62,7 +62,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             (QRegularExpression(r"`[^`\n]+`"), self.code_fmt),
             (QRegularExpression(r"!?\[[^\]]+\]\([^\)]+\)"), self.link_fmt),
             (QRegularExpression(r"^\s*>.*$"), self.quote_fmt),
-            (QRegularExpression(r"^\s*([-+*]|\d+\.)\s+.*$"), self.list_fmt),
+            (QRegularExpression(r"^\s*([-+*]|\d+\.)\s+"), self.list_fmt),
             (QRegularExpression(r"^\s*(-{3,}|_{3,}|\*{3,})\s*$"), self.hr_fmt),
         ]
         self.fence_rule = QRegularExpression(r"^\s*(```|~~~).*$")
@@ -115,6 +115,8 @@ class MarkdownEditor(QPlainTextEdit):
         self._current_line_bg = None
         self._line_number_fg = None
         self._line_number_bg = None
+        self._readable_width = False
+        self._horizontal_inset = 0
         self.theme = theme if theme in THEMES else "light"
         self.line_number_area = LineNumberArea(self)
 
@@ -135,6 +137,17 @@ class MarkdownEditor(QPlainTextEdit):
         self.apply_theme(self.theme)
         self.update_line_number_area_width(0)
         self.highlight_current_line()
+
+    def apply_typography(self, family: str, size: int) -> None:
+        available = set(QFontDatabase.families())
+        if family not in available:
+            family = next((name for name in ("Consolas", "Menlo", "DejaVu Sans Mono") if name in available), QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family())
+        font = QFont(family)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(size)
+        self.setFont(font)
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+        self.update_line_number_area_width(0)
 
     def apply_theme(self, theme: str) -> None:
         self.theme = theme if theme in THEMES else "light"
@@ -162,7 +175,17 @@ class MarkdownEditor(QPlainTextEdit):
         return 14 + self.fontMetrics().horizontalAdvance("9") * digits
 
     def update_line_number_area_width(self, _new_block_count: int) -> None:
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+        gutter = self.line_number_area_width()
+        column = self.fontMetrics().horizontalAdvance("M") * 88
+        self._horizontal_inset = max(0, (self.contentsRect().width() - gutter - column - 20) // 2) if self._readable_width else 0
+        inset = self._horizontal_inset
+        self.setViewportMargins(gutter + inset, 0, inset, 0)
+        cr = self.contentsRect()
+        self.line_number_area.setGeometry(QRect(cr.left() + inset, cr.top(), gutter, cr.height()))
+
+    def set_readable_width(self, enabled: bool) -> None:
+        self._readable_width = enabled
+        self.update_line_number_area_width(0)
 
     def update_line_number_area(self, rect: QRect, dy: int) -> None:
         if dy:
@@ -174,11 +197,11 @@ class MarkdownEditor(QPlainTextEdit):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        cr = self.contentsRect()
-        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+        self.update_line_number_area_width(0)
 
     def line_number_area_paint_event(self, event) -> None:
         painter = QPainter(self.line_number_area)
+        painter.setFont(self.font())
         painter.fillRect(event.rect(), self._line_number_bg)
 
         block = self.firstVisibleBlock()

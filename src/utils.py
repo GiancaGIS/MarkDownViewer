@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QIODevice, QSaveFile, QSettings
 
 try:
     from .config import MARKDOWN_SUFFIXES
@@ -65,6 +65,24 @@ def read_text_file(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(encoding="latin-1")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Replace a UTF-8 file only after the complete content was written."""
+    write_bytes_atomic(path, text.encode("utf-8"))
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Commit a complete document without truncating an existing destination."""
+    target = QSaveFile(str(path))
+    if not target.open(QIODevice.OpenModeFlag.WriteOnly):
+        raise OSError(target.errorString())
+    if target.write(data) != len(data):
+        error = target.errorString()
+        target.cancelWriting()
+        raise OSError(error)
+    if not target.commit():
+        raise OSError(target.errorString())
 
 
 def is_markdown_file(path: Path) -> bool:

@@ -1,31 +1,49 @@
 from __future__ import annotations
 
 import os
-import json
+import html
 import re
 import shutil
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QSettings, QSize, QTimer, QUrl, Qt
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QTextCursor, QTextDocument
-from PyQt6.QtWidgets import QApplication, QCheckBox, QFileDialog, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QStatusBar, QStyle, QTabWidget, QToolBar, QVBoxLayout, QWidget
+from PyQt6.QtCore import QSettings, QSize, QTimer, QUrl, Qt
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QTextCursor, QTextDocument
+from PyQt6.QtWidgets import QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QStatusBar, QStyle, QToolBar, QToolButton, QVBoxLayout, QWidget
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 try:
-    from .config import APP_NAME, APP_THEME_QSS, DEFAULT_MARKDOWN, MAX_RECENT_FILES, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_RESULTS, ORG_NAME, THEMES, VERSION
+    from .config import APP_AUTHOR, APP_COPYRIGHT, APP_NAME, APP_THEME_QSS, DEFAULT_MARKDOWN, GITHUB_RELEASES_URL, MAX_RECENT_FILES, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_RESULTS, ORG_NAME, THEMES, VERSION
     from .editor import MarkdownEditor
+    from .document_tabs import DocumentTabs
+    from .navigation import NavigationRail
+    from .ui_icons import ui_icon
+    from .preferences import PreferencesDialog, Typography
+    from .pdf_export import PdfExporter, PdfResult
+    from .pdf_options import PdfOptionsDialog
+    from .toast import UpdateToast
+    from .updates import Release, UpdateChecker, UpdateResult
     from .i18n import SUPPORTED_LANGUAGES, translate
     from .renderer import MarkdownRenderer
-    from .utils import SearchHit, as_bool, coerce_splitter_sizes, is_markdown_file, read_text_file, save_settings_list, settings_list
+    from .scroll_sync import ScrollSynchronizer
+    from .utils import SearchHit, as_bool, coerce_splitter_sizes, is_markdown_file, read_text_file, save_settings_list, settings_list, write_text_atomic
     from .web_page import LinkInterceptorPage
     from .workspace import WorkspacePanel
 except ImportError:
-    from config import APP_NAME, APP_THEME_QSS, DEFAULT_MARKDOWN, MAX_RECENT_FILES, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_RESULTS, ORG_NAME, THEMES, VERSION
+    from config import APP_AUTHOR, APP_COPYRIGHT, APP_NAME, APP_THEME_QSS, DEFAULT_MARKDOWN, GITHUB_RELEASES_URL, MAX_RECENT_FILES, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_RESULTS, ORG_NAME, THEMES, VERSION
     from editor import MarkdownEditor
+    from document_tabs import DocumentTabs
+    from navigation import NavigationRail
+    from ui_icons import ui_icon
+    from preferences import PreferencesDialog, Typography
+    from pdf_export import PdfExporter, PdfResult
+    from pdf_options import PdfOptionsDialog
+    from toast import UpdateToast
+    from updates import Release, UpdateChecker, UpdateResult
     from i18n import SUPPORTED_LANGUAGES, translate
     from renderer import MarkdownRenderer
-    from utils import SearchHit, as_bool, coerce_splitter_sizes, is_markdown_file, read_text_file, save_settings_list, settings_list
+    from scroll_sync import ScrollSynchronizer
+    from utils import SearchHit, as_bool, coerce_splitter_sizes, is_markdown_file, read_text_file, save_settings_list, settings_list, write_text_atomic
     from web_page import LinkInterceptorPage
     from workspace import WorkspacePanel
 
@@ -41,32 +59,41 @@ class MainWindow(QMainWindow):
             self.language = "it"
         self.autosave_enabled = as_bool(self.settings.value("autosave_enabled", True), True)
         self.sync_preview_scroll_enabled = as_bool(self.settings.value("sync_preview_scroll_enabled", True), True)
+        self.typography = Typography.load(self.settings)
+        self.check_updates_on_startup = as_bool(self.settings.value("check_updates_on_startup", True), True)
+        self.available_release: Release | None = None
+        self._manual_update_check = False
+        self.view_mode = "writing"
+        self._split_sizes = [650, 720]
+        self._stack_sizes = [1, 1]
+        self._sidebar_requested = as_bool(self.settings.value("sidebar_visible", True), True)
+        self._sidebar_compact_open = False
+        self._sidebar_width = 224
+        self._compact_layout = False
         self.current_path: Path | None = None
         self.document_paths: dict[MarkdownEditor, Path | None] = {}
+        self.document_autosave_timers: dict[MarkdownEditor, QTimer] = {}
         self.workspace_dir: Path | None = self._load_workspace_dir()
         self.recent_files: list[Path] = self._load_recent_files()
         self._loading = False
         self._last_find_text = ""
-        self._pending_pdf_path: Path | None = None
-        self._pending_pdf_retries = 0
-        self._syncing_preview_from_editor = False
-        self._syncing_editor_from_preview = False
 
         self.renderer = MarkdownRenderer(self.theme)
+        self.renderer.typography = self.typography
 
         self.setWindowTitle(APP_NAME)
-        self.resize(1480, 880)
+        self.setFont(QFont("Segoe UI", 10))
+        screen = self.screen().availableGeometry()
+        self.resize(min(1180, screen.width() - 48), min(760, screen.height() - 48))
 
         self.preview = QWebEngineView()
         self.preview.setPage(LinkInterceptorPage(self.preview))
         self.preview.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.preview.installEventFilter(self)
-        try:
-            self.preview.page().pdfPrintingFinished.connect(self.on_pdf_printing_finished)
-        except Exception:
-            pass
-        self.preview.loadFinished.connect(self.on_preview_load_finished)
+        self.scroll_sync = ScrollSynchronizer(
+            self.preview, lambda: self.editor,
+            lambda: self.sync_preview_scroll_enabled and self.view_mode == "split", self,
+        )
 
         self.find_box = QLineEdit()
         self.find_box.setPlaceholderText("Trova nel testo...")
@@ -78,22 +105,7 @@ class MainWindow(QMainWindow):
         self.update_timer.setInterval(220)
         self.update_timer.timeout.connect(self.update_preview)
 
-        self.autosave_timer = QTimer(self)
-        self.autosave_timer.setSingleShot(True)
-        self.autosave_timer.setInterval(1500)
-        self.autosave_timer.timeout.connect(self.autosave_current_file)
-
-        self.preview_scroll_timer = QTimer(self)
-        self.preview_scroll_timer.setSingleShot(True)
-        self.preview_scroll_timer.setInterval(35)
-        self.preview_scroll_timer.timeout.connect(self.sync_preview_scroll)
-
-        self.editor_scroll_timer = QTimer(self)
-        self.editor_scroll_timer.setSingleShot(True)
-        self.editor_scroll_timer.setInterval(80)
-        self.editor_scroll_timer.timeout.connect(self.sync_editor_scroll_from_preview)
-
-        self.document_tabs = QTabWidget()
+        self.document_tabs = DocumentTabs()
         self.document_tabs.setTabsClosable(True)
         self.document_tabs.setMovable(True)
         self.document_tabs.currentChanged.connect(self.on_current_tab_changed)
@@ -114,34 +126,17 @@ class MainWindow(QMainWindow):
         self.update_outline()
         self.update_window_title()
         self.update_status()
+        self.update_toast = UpdateToast(self)
+        self.update_toast.activated.connect(self.open_release_page)
+        self.update_checker = UpdateChecker(self)
+        self.update_checker.finished.connect(self.on_update_check_finished)
+        self.update_checker.busy_changed.connect(lambda busy: self.actions["check_updates"].setEnabled(not busy))
+        self.pdf_exporter = PdfExporter(self)
+        self.pdf_exporter.finished.connect(self.on_pdf_export_finished)
+        self.pdf_exporter.busy_changed.connect(lambda busy: self.actions["export_pdf"].setEnabled(not busy))
 
     def tr(self, key: str, **kwargs) -> str:
         return translate(self.language, key, **kwargs)
-
-    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        is_preview_widget = watched is self.preview or (
-            hasattr(self, "preview") and isinstance(watched, QWidget) and self.preview.isAncestorOf(watched)
-        )
-        if is_preview_widget and self.sync_preview_scroll_enabled:
-            if event.type() in {
-                QEvent.Type.Wheel,
-                QEvent.Type.KeyRelease,
-                QEvent.Type.MouseButtonRelease,
-            }:
-                self.schedule_editor_scroll_sync_from_preview()
-        return super().eventFilter(watched, event)
-
-    def on_preview_load_finished(self, _ok: bool) -> None:
-        self.install_preview_event_filters()
-        self.schedule_preview_scroll_sync()
-        if self._pending_pdf_path:
-            self._pending_pdf_retries = 0
-            self.wait_for_preview_before_pdf()
-
-    def install_preview_event_filters(self) -> None:
-        self.preview.installEventFilter(self)
-        for child in self.preview.findChildren(QWidget):
-            child.installEventFilter(self)
 
     @property
     def editor(self) -> MarkdownEditor:
@@ -151,22 +146,32 @@ class MainWindow(QMainWindow):
         raise RuntimeError("No active document editor")
 
     def _create_document_tab(self, text: str = "", path: Path | None = None, *, modified: bool = False) -> MarkdownEditor:
+        path = path.resolve() if path is not None else None
         editor = MarkdownEditor(self.theme)
+        editor.apply_typography(self.typography.editor_font, self.typography.editor_size)
+        editor.set_readable_width(self.view_mode == "writing")
         editor.textChanged.connect(self.on_text_changed)
         editor.cursorPositionChanged.connect(self.update_status)
-        editor.verticalScrollBar().valueChanged.connect(self.schedule_preview_scroll_sync)
+        editor.verticalScrollBar().valueChanged.connect(lambda value, doc=editor: self.scroll_sync.editor_scrolled(doc))
         editor.imagesDropped.connect(self.insert_dropped_images)
+        timer = QTimer(editor)
+        timer.setSingleShot(True)
+        timer.setInterval(1500)
+        timer.timeout.connect(lambda doc=editor: self.autosave_document(doc))
+        self.document_autosave_timers[editor] = timer
 
         self._loading = True
         editor.setPlainText(text)
         editor.document().setModified(modified)
         self._loading = False
         if isinstance(getattr(self, "actions", None), dict):
+            wrap = self.actions["wrap"].isChecked()
             editor.setLineWrapMode(
                 QPlainTextEdit.LineWrapMode.WidgetWidth
-                if self.actions["wrap"].isChecked()
+                if wrap
                 else QPlainTextEdit.LineWrapMode.NoWrap
             )
+            editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff if wrap else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.document_paths[editor] = path
         index = self.document_tabs.addTab(editor, self._tab_title_for(editor))
@@ -180,7 +185,9 @@ class MainWindow(QMainWindow):
         return f"{name} *" if editor.document().isModified() else name
 
     def update_current_tab_title(self) -> None:
-        editor = self.editor
+        self.update_tab_title(self.editor)
+
+    def update_tab_title(self, editor: MarkdownEditor) -> None:
         index = self.document_tabs.indexOf(editor)
         if index >= 0:
             self.document_tabs.setTabText(index, self._tab_title_for(editor))
@@ -218,6 +225,9 @@ class MainWindow(QMainWindow):
         editor = self.document_tabs.widget(index)
         self.document_tabs.removeTab(index)
         if isinstance(editor, MarkdownEditor):
+            timer = self.document_autosave_timers.pop(editor, None)
+            if timer:
+                timer.stop()
             self.document_paths.pop(editor, None)
             editor.deleteLater()
 
@@ -245,16 +255,80 @@ class MainWindow(QMainWindow):
         return paths[:MAX_RECENT_FILES]
 
     def _build_ui(self) -> None:
+        self.format_toolbar = QToolBar()
+        self.format_toolbar.setObjectName("formatToolbar")
+        self.format_toolbar.setMovable(False)
+        self.format_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.format_toolbar.setIconSize(QSize(16, 16))
+        self.format_toolbar.setFixedHeight(32)
+
+        self.editor_panel = QWidget()
+        editor_layout = QVBoxLayout(self.editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self.format_toolbar)
+        editor_layout.addWidget(self.document_tabs.pages, 1)
+
+        self.preview_panel = QWidget()
+        preview_layout = QVBoxLayout(self.preview_panel)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+        self.preview_label = QLabel(self.tr("preview"))
+        self.preview_label.setObjectName("panelCaption")
+        self.preview_label.setFixedHeight(32)
+        preview_layout.addWidget(self.preview_label)
+        preview_layout.addWidget(self.preview, 1)
+
         self.editor_preview_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.editor_preview_splitter.addWidget(self.document_tabs)
-        self.editor_preview_splitter.addWidget(self.preview)
+        self.editor_preview_splitter.addWidget(self.editor_panel)
+        self.editor_preview_splitter.addWidget(self.preview_panel)
+        self.editor_preview_splitter.setChildrenCollapsible(False)
+        self.editor_preview_splitter.setHandleWidth(3)
         self.editor_preview_splitter.setSizes([650, 720])
+
+        self.find_bar = QWidget()
+        self.find_bar.setObjectName("findBar")
+        search_layout = QHBoxLayout(self.find_bar)
+        search_layout.setContentsMargins(12, 8, 12, 8)
+        search_layout.addWidget(self.find_box, 1)
+        search_layout.addWidget(self.find_case_checkbox)
+        self.find_prev_button = QPushButton(self.tr("previous"))
+        self.find_prev_button.clicked.connect(self.find_previous)
+        self.find_button = QPushButton(self.tr("next"))
+        self.find_button.clicked.connect(self.find_next)
+        self.find_close_button = QToolButton()
+        self.find_close_button.setText("×")
+        self.find_close_button.clicked.connect(self.hide_find_bar)
+        search_layout.addWidget(self.find_prev_button)
+        search_layout.addWidget(self.find_button)
+        search_layout.addWidget(self.find_close_button)
+        self.find_bar.hide()
+
+        self.document_area = QWidget()
+        content_layout = QVBoxLayout(self.document_area)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self.find_bar)
+        content_layout.addWidget(self.editor_preview_splitter, 1)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self.workspace_panel)
-        self.main_splitter.addWidget(self.editor_preview_splitter)
-        self.main_splitter.setSizes([315, 1165])
-        self.setCentralWidget(self.main_splitter)
+        self.main_splitter.addWidget(self.document_area)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(1)
+        self.main_splitter.setSizes([224, 956])
+        self.navigation = NavigationRail()
+        self.navigation.section_selected.connect(self.show_sidebar_section)
+        self.navigation.preferences_requested.connect(self.show_preferences)
+        shell = QWidget()
+        shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        shell_layout.addWidget(self.navigation)
+        shell_layout.addWidget(self.main_splitter, 1)
+        self.setCentralWidget(shell)
+        self.main_splitter.splitterMoved.connect(self._remember_sidebar_width)
 
     def _document_icon(self, label: str, accent: str) -> QIcon:
         pixmap = QPixmap(36, 36)
@@ -282,8 +356,12 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self) -> None:
         toolbar = QToolBar("Comandi")
+        self.main_toolbar = toolbar
+        toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setIconSize(QSize(18, 18))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        toolbar.setFixedHeight(44)
         self.addToolBar(toolbar)
 
         def decorate(action: QAction, icon: QStyle.StandardPixmap, tooltip: str) -> None:
@@ -295,6 +373,7 @@ class MainWindow(QMainWindow):
         menu_view = self.menuBar().addMenu("Vista")
         menu_workspace = self.menuBar().addMenu("Workspace")
         menu_export = self.menuBar().addMenu("Export")
+        menu_help = self.menuBar().addMenu(self.tr("menu_help"))
         menu_language = menu_view.addMenu("Lingua")
         self.menus = {
             "file": menu_file,
@@ -303,7 +382,21 @@ class MainWindow(QMainWindow):
             "workspace": menu_workspace,
             "export": menu_export,
             "language": menu_language,
+            "help": menu_help,
         }
+        self.application_menu = QMenu(self)
+        for menu in (menu_file, menu_edit, menu_view, menu_workspace, menu_export, menu_help):
+            self.application_menu.addMenu(menu)
+        self.application_menu_button = QToolButton()
+        self.application_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.application_menu_button.setMenu(self.application_menu)
+        self.application_menu_button.setObjectName("applicationMenu")
+        toolbar.addWidget(self.application_menu_button)
+        self.menuBar().hide()
+        menu_action = QAction(self)
+        menu_action.setShortcut(QKeySequence("F10"))
+        menu_action.triggered.connect(self.application_menu_button.showMenu)
+        self.addAction(menu_action)
 
         new_action = QAction("Nuovo", self)
         new_action.setShortcut(QKeySequence.StandardKey.New)
@@ -330,7 +423,6 @@ class MainWindow(QMainWindow):
         open_workspace_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         open_workspace_action.triggered.connect(self.choose_workspace)
         decorate(open_workspace_action, QStyle.StandardPixmap.SP_DirOpenIcon, "Apri workspace")
-        toolbar.addAction(open_workspace_action)
         menu_workspace.addAction(open_workspace_action)
 
         save_action = QAction("Salva", self)
@@ -353,7 +445,6 @@ class MainWindow(QMainWindow):
         export_html_action.triggered.connect(self.export_html)
         export_html_action.setIcon(self._document_icon("HTML", "#2563eb"))
         export_html_action.setToolTip("Esporta il documento come HTML")
-        toolbar.addAction(export_html_action)
         menu_export.addAction(export_html_action)
 
         export_pdf_action = QAction("Esporta PDF", self)
@@ -361,76 +452,109 @@ class MainWindow(QMainWindow):
         export_pdf_action.triggered.connect(self.export_pdf)
         export_pdf_action.setIcon(self._document_icon("PDF", "#dc2626"))
         export_pdf_action.setToolTip("Esporta il documento come PDF")
-        toolbar.addAction(export_pdf_action)
         menu_export.addAction(export_pdf_action)
-
-        toolbar.addSeparator()
 
         bold_action = QAction("Grassetto", self)
         bold_action.setShortcut(QKeySequence("Ctrl+B"))
         bold_action.triggered.connect(lambda: self.wrap_selection("**", "**", self.tr("text_placeholder")))
         bold_action.setToolTip("Grassetto")
-        toolbar.addAction(bold_action)
         menu_edit.addAction(bold_action)
 
         italic_action = QAction("Corsivo", self)
         italic_action.setShortcut(QKeySequence("Ctrl+I"))
         italic_action.triggered.connect(lambda: self.wrap_selection("*", "*", self.tr("text_placeholder")))
         italic_action.setToolTip("Corsivo")
-        toolbar.addAction(italic_action)
         menu_edit.addAction(italic_action)
 
         code_action = QAction("Codice", self)
         code_action.setShortcut(QKeySequence("Ctrl+K"))
         code_action.triggered.connect(lambda: self.wrap_selection("`", "`", self.tr("code_placeholder")))
         code_action.setToolTip("Codice inline")
-        toolbar.addAction(code_action)
         menu_edit.addAction(code_action)
 
         code_block_action = QAction("Blocco codice", self)
         code_block_action.setShortcut(QKeySequence("Ctrl+Shift+K"))
         code_block_action.triggered.connect(self.insert_code_block)
         code_block_action.setToolTip("Blocco codice")
-        toolbar.addAction(code_block_action)
+        self.format_buttons: dict[str, QToolButton] = {}
+        for key, action, label in (("bold", bold_action, "B"), ("italic", italic_action, "I"), ("code", code_action, "</>")):
+            button = QToolButton()
+            button.setText(label)
+            button.clicked.connect(lambda checked=False, command=action: command.trigger())
+            action.changed.connect(lambda command=action, control=button: control.setEnabled(command.isEnabled()))
+            self.format_toolbar.addWidget(button)
+            self.format_buttons[key] = button
+        self.format_toolbar.addSeparator()
         menu_edit.addAction(code_block_action)
 
         heading_action = QAction("H2", self)
         heading_action.triggered.connect(lambda: self.prefix_current_line("## "))
-        toolbar.addAction(heading_action)
+        self.format_toolbar.addAction(heading_action)
         menu_edit.addAction(heading_action)
 
         list_action = QAction("Lista", self)
         list_action.triggered.connect(lambda: self.prefix_current_line("- "))
-        toolbar.addAction(list_action)
+        self.format_toolbar.addAction(list_action)
         menu_edit.addAction(list_action)
 
         quote_action = QAction("Quote", self)
         quote_action.triggered.connect(lambda: self.prefix_current_line("> "))
-        toolbar.addAction(quote_action)
+        self.format_toolbar.addAction(quote_action)
         menu_edit.addAction(quote_action)
 
         link_action = QAction("Link", self)
         link_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
         link_action.triggered.connect(self.insert_link)
         link_action.setToolTip("Inserisci link")
-        toolbar.addAction(link_action)
         menu_edit.addAction(link_action)
 
         image_action = QAction("Immagine", self)
         image_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
         image_action.triggered.connect(self.insert_image)
         image_action.setToolTip("Inserisci immagine")
-        toolbar.addAction(image_action)
         menu_edit.addAction(image_action)
 
         table_action = QAction("Tabella", self)
         table_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
         table_action.triggered.connect(self.insert_table)
         table_action.setToolTip("Inserisci tabella")
-        toolbar.addAction(table_action)
         menu_edit.addAction(table_action)
 
+        self.insert_button = QToolButton()
+        self.insert_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        insert_menu = QMenu(self.insert_button)
+        for action in (link_action, image_action, table_action, code_block_action):
+            insert_menu.addAction(action)
+        self.insert_button.setMenu(insert_menu)
+        self.format_toolbar.addSeparator()
+        self.format_toolbar.addWidget(self.insert_button)
+
+        self.document_tabs.setMinimumWidth(100)
+        self.document_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.document_tabs.setUsesScrollButtons(True)
+        toolbar.addWidget(self.document_tabs)
+
+        self.view_group = QActionGroup(self)
+        self.view_group.setExclusive(True)
+        self.view_actions: dict[str, QAction] = {}
+        for mode, key, shortcut in (("writing", "writing", "Ctrl+Alt+1"), ("split", "split_view", "Ctrl+Alt+2"), ("reading", "reading", "Ctrl+Alt+3")):
+            action = QAction(self.tr(key), self)
+            action.setCheckable(True)
+            action.setChecked(mode == self.view_mode)
+            action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(lambda checked, value=mode: self.set_view_mode(value) if checked else None)
+            self.view_group.addAction(action)
+            self.view_actions[mode] = action
+            toolbar.addAction(action)
+            menu_view.addAction(action)
+        menu_view.addSeparator()
         toolbar.addSeparator()
+
+        self.export_button = QToolButton()
+        self.export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.export_button.setMenu(menu_export)
+        toolbar.addWidget(self.export_button)
 
         search_workspace_action = QAction("Cerca nel workspace", self)
         search_workspace_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
@@ -480,18 +604,44 @@ class MainWindow(QMainWindow):
             menu_language.addAction(language_action)
             self.language_actions[code] = language_action
 
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("  "))
-        toolbar.addWidget(self.find_box)
-        toolbar.addWidget(self.find_case_checkbox)
+        find_action = QAction(self.tr("find"), self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self.show_find_bar)
+        decorate(find_action, QStyle.StandardPixmap.SP_FileDialogContentsView, self.tr("find"))
+        menu_edit.addSeparator()
+        menu_edit.addAction(find_action)
+        toolbar.addAction(find_action)
 
-        self.find_button = QPushButton("Trova")
-        self.find_button.clicked.connect(self.find_next)
-        toolbar.addWidget(self.find_button)
+        find_next_action = QAction(self.tr("next"), self)
+        find_next_action.setShortcut(QKeySequence("F3"))
+        find_next_action.triggered.connect(self.find_next)
+        menu_edit.addAction(find_next_action)
+        find_previous_action = QAction(self.tr("previous"), self)
+        find_previous_action.setShortcut(QKeySequence("Shift+F3"))
+        find_previous_action.triggered.connect(self.find_previous)
+        menu_edit.addAction(find_previous_action)
+        self.close_find_action = QAction(self)
+        self.close_find_action.setShortcut(QKeySequence("Escape"))
+        self.close_find_action.triggered.connect(self.hide_find_bar)
+        self.close_find_action.setEnabled(False)
+        self.addAction(self.close_find_action)
 
-        self.find_prev_button = QPushButton("Precedente")
-        self.find_prev_button.clicked.connect(self.find_previous)
-        toolbar.addWidget(self.find_prev_button)
+        preferences_action = QAction(self.tr("preferences"), self)
+        preferences_action.setShortcut(QKeySequence("Ctrl+,"))
+        preferences_action.triggered.connect(self.show_preferences)
+        menu_view.addSeparator()
+        menu_view.addAction(preferences_action)
+
+        check_updates_action = QAction(self.tr("check_updates"), self)
+        check_updates_action.triggered.connect(self.check_for_updates)
+        menu_help.addAction(check_updates_action)
+        releases_action = QAction(self.tr("github_releases"), self)
+        releases_action.triggered.connect(self.open_release_page)
+        menu_help.addAction(releases_action)
+        menu_help.addSeparator()
+        about_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation), self.tr("about"), self)
+        about_action.triggered.connect(self.show_about)
+        menu_help.addAction(about_action)
 
         self.actions = {
             "new": new_action,
@@ -518,13 +668,26 @@ class MainWindow(QMainWindow):
             "autosave": autosave_action,
             "wrap": wrap_action,
             "sync_scroll": sync_scroll_action,
+            "find": find_action,
+            "find_next": find_next_action,
+            "find_previous": find_previous_action,
+            "preferences": preferences_action,
+            "check_updates": check_updates_action,
+            "releases": releases_action,
+            "about": about_action,
         }
+        for action in self.actions.values():
+            self.addAction(action)
+        self._apply_command_icons()
 
     def _build_statusbar(self) -> None:
         status = QStatusBar()
         self.setStatusBar(status)
         self.path_label = QLabel("Senza file")
+        self.path_label.setMinimumWidth(0)
+        self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.status_label = QLabel("Pronto")
+        status.setFixedHeight(24)
         status.addWidget(self.path_label, 1)
         status.addPermanentWidget(self.status_label)
 
@@ -536,6 +699,7 @@ class MainWindow(QMainWindow):
             self.menus["workspace"].setTitle(self.tr("menu_workspace"))
             self.menus["export"].setTitle(self.tr("menu_export"))
             self.menus["language"].setTitle(self.tr("menu_language"))
+            self.menus["help"].setTitle(self.tr("menu_help"))
 
         if hasattr(self, "actions"):
             action_texts = {
@@ -562,6 +726,13 @@ class MainWindow(QMainWindow):
                 "autosave": "autosave",
                 "wrap": "word_wrap",
                 "sync_scroll": "sync_scroll",
+                "find": "find",
+                "find_next": "next",
+                "find_previous": "previous",
+                "preferences": "preferences",
+                "check_updates": "check_updates",
+                "releases": "github_releases",
+                "about": "about",
             }
             for action_name, key in action_texts.items():
                 self.actions[action_name].setText(key if key == "H2" else self.tr(key))
@@ -591,15 +762,157 @@ class MainWindow(QMainWindow):
         self.find_box.setPlaceholderText(self.tr("find_placeholder"))
         self.find_case_checkbox.setText(self.tr("case_sensitive"))
         if hasattr(self, "find_button"):
-            self.find_button.setText(self.tr("find"))
+            self.find_button.setText(self.tr("next"))
         if hasattr(self, "find_prev_button"):
             self.find_prev_button.setText(self.tr("previous"))
+        self.main_toolbar.setWindowTitle(self.tr("commands"))
+        self.format_toolbar.setWindowTitle(self.tr("formatting"))
+        self.preview_label.setText(self.tr("preview"))
+        self.insert_button.setText(self.tr("insert"))
+        self.export_button.setText(self.tr("menu_export"))
+        self.export_button.setToolTip(self.tr("menu_export"))
+        self.export_button.setAccessibleName(self.tr("menu_export"))
+        self.application_menu_button.setToolTip(self.tr("application_menu"))
+        self.application_menu_button.setAccessibleName(self.tr("application_menu"))
+        self.navigation.apply_language(self.tr)
+        self.find_close_button.setToolTip(self.tr("close_search"))
+        self.find_close_button.setAccessibleName(self.tr("close_search"))
+        self.find_box.setAccessibleName(self.tr("find_placeholder"))
+        self.document_tabs.set_close_label(self.tr("close_document"))
+        for mode, key in (("writing", "writing"), ("split", "split_view"), ("reading", "reading")):
+            self.view_actions[mode].setText(self.tr(key))
+        for name, label in (("bold", "B"), ("italic", "I"), ("code", "</>")):
+            button = self.format_buttons[name]
+            if isinstance(button, QToolButton):
+                button.setText(label)
+                button.setAccessibleName(self.actions[name].text())
+                button.setToolTip(self.actions[name].toolTip())
+                font = button.font()
+                font.setBold(name == "bold")
+                font.setItalic(name == "italic")
+                button.setFont(font)
         self.workspace_panel.apply_language()
         self.workspace_panel.refresh_recent(self.recent_files)
         self.update_outline()
         self.update_theme_action_text()
         self.update_window_title()
         self.update_status()
+        self._apply_command_icons()
+        if hasattr(self, "update_toast") and self.available_release is not None:
+            self.update_toast.set_labels(*self._update_toast_labels())
+            self.update_toast.reposition()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "view_actions"):
+            self._apply_responsive_layout()
+        if hasattr(self, "update_toast") and self.update_toast.isVisible():
+            self.update_toast.reposition()
+
+    def _apply_command_icons(self) -> None:
+        color = THEMES[self.theme]["preview_fg"]
+        for name, icon in (("new", "new"), ("open", "folder"), ("save", "save"), ("find", "search"), ("list", "list"), ("quote", "quote")):
+            self.actions[name].setIcon(ui_icon(icon, color))
+        for name in ("list", "quote"):
+            button = self.format_toolbar.widgetForAction(self.actions[name])
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            self.actions[name].setToolTip(self.actions[name].text())
+        for mode, action in self.view_actions.items():
+            action.setIcon(ui_icon(mode, color))
+            action.setToolTip(f"{action.text()} ({action.shortcut().toString()})")
+        self.application_menu_button.setIcon(ui_icon("menu", color))
+        self.export_button.setIcon(ui_icon("export", color))
+        self.navigation.apply_theme(THEMES[self.theme]["preview_muted"])
+        self.workspace_panel.apply_theme(THEMES[self.theme]["preview_muted"])
+
+    def _remember_sidebar_width(self, _position: int, _index: int) -> None:
+        if not self.workspace_panel.isHidden():
+            self._sidebar_width = self.main_splitter.sizes()[0]
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        compact = self.width() < 1080
+        if compact and not self._compact_layout:
+            self._sidebar_compact_open = False
+        self._compact_layout = compact
+        visible = self._sidebar_requested and (not compact or self._sidebar_compact_open)
+        was_hidden = self.workspace_panel.isHidden()
+        self.workspace_panel.setVisible(visible)
+        if visible and was_hidden:
+            self.main_splitter.setSizes([self._sidebar_width, max(1, self.main_splitter.width() - self._sidebar_width)])
+        self.navigation.set_section(self.workspace_panel.section if visible else None)
+        available = self.main_splitter.width() - (self._sidebar_width + 1 if visible else 0)
+        orientation = Qt.Orientation.Horizontal if available >= 880 else Qt.Orientation.Vertical
+        splitter = self.editor_preview_splitter
+        if splitter.orientation() != orientation:
+            if self.view_mode == "split":
+                self._remember_document_split()
+            splitter.setOrientation(orientation)
+            self._restore_document_split()
+        stacked = orientation == Qt.Orientation.Vertical and self.view_mode == "split"
+        self.editor_panel.setMinimumHeight(140 if stacked else 0)
+        self.preview_panel.setMinimumHeight(140 if stacked else 0)
+        self.preview_label.setVisible(self.view_mode == "split")
+
+    def _restore_document_split(self) -> None:
+        horizontal = self.editor_preview_splitter.orientation() == Qt.Orientation.Horizontal
+        saved = self._split_sizes if horizontal else self._stack_sizes
+        extent = self.editor_preview_splitter.width() if horizontal else self.editor_preview_splitter.height()
+        total = max(2, extent - self.editor_preview_splitter.handleWidth())
+        first = round(total * saved[0] / max(1, sum(saved)))
+        self.editor_preview_splitter.setSizes([first, total - first])
+
+    def _remember_document_split(self) -> None:
+        sizes = self.editor_preview_splitter.sizes()
+        if all(size > 0 for size in sizes):
+            if self.editor_preview_splitter.orientation() == Qt.Orientation.Horizontal:
+                self._split_sizes = sizes
+            else:
+                self._stack_sizes = sizes
+
+    def show_sidebar_section(self, section: str, *, toggle: bool = True) -> None:
+        if toggle and not self.workspace_panel.isHidden() and self.workspace_panel.section == section:
+            self._sidebar_requested = False
+        else:
+            self._sidebar_requested = True
+            self._sidebar_compact_open = True
+            self.workspace_panel.show_section(section)
+        self._apply_responsive_layout()
+
+    def dismiss_compact_sidebar(self) -> None:
+        if self._compact_layout:
+            self._sidebar_compact_open = False
+            self._apply_responsive_layout()
+
+    def check_startup_updates(self) -> None:
+        if self.check_updates_on_startup and not self.update_checker.has_checked:
+            self.update_checker.check()
+
+    def check_for_updates(self) -> None:
+        self._manual_update_check = True
+        self.statusBar().showMessage(self.tr("checking_updates"), 10_000)
+        self.update_checker.check()
+
+    def _update_toast_labels(self) -> tuple[str, str, str, str]:
+        return (
+            self.tr("update_available"),
+            self.tr("update_available_body", version=self.available_release.version, current=VERSION),
+            self.tr("open_release"), self.tr("dismiss_notification"),
+        )
+
+    def on_update_check_finished(self, result: UpdateResult) -> None:
+        manual, self._manual_update_check = self._manual_update_check, False
+        if result.status == "available" and result.release is not None:
+            self.available_release = result.release
+            self.update_toast.notify(*self._update_toast_labels())
+            self.statusBar().showMessage(self.tr("update_available"), 5000)
+        elif manual:
+            key = {"current": "updates_current", "no_release": "updates_no_release"}.get(result.status, "updates_unavailable")
+            self.statusBar().showMessage(self.tr(key, version=VERSION), 8000)
+
+    def open_release_page(self) -> None:
+        url = self.available_release.url if self.available_release else GITHUB_RELEASES_URL
+        QDesktopServices.openUrl(QUrl(url))
 
     def set_language(self, language: str) -> None:
         if language not in SUPPORTED_LANGUAGES or language == self.language:
@@ -623,36 +936,51 @@ class MainWindow(QMainWindow):
 
         main_sizes = coerce_splitter_sizes(self.settings.value("main_splitter_sizes"), 2)
         if main_sizes:
-            self.main_splitter.setSizes(main_sizes)
+            self._sidebar_width = max(190, min(300, main_sizes[0]))
+            self.main_splitter.setSizes([self._sidebar_width, main_sizes[1]])
 
         editor_sizes = coerce_splitter_sizes(self.settings.value("editor_preview_splitter_sizes"), 2)
         # Backward compatibility with v0.2 key.
         if not editor_sizes:
             editor_sizes = coerce_splitter_sizes(self.settings.value("splitter_sizes"), 2)
         if editor_sizes:
-            self.editor_preview_splitter.setSizes(editor_sizes)
+            if all(size > 0 for size in editor_sizes):
+                self._split_sizes = editor_sizes
+        stack_sizes = coerce_splitter_sizes(self.settings.value("editor_preview_vertical_sizes"), 2)
+        if stack_sizes and all(size > 0 for size in stack_sizes):
+            self._stack_sizes = stack_sizes
 
         line_wrap = as_bool(self.settings.value("line_wrap", True), True)
         self.actions["wrap"].setChecked(line_wrap)
         self.set_line_wrap(line_wrap)
 
-        sidebar_visible = as_bool(self.settings.value("sidebar_visible", True), True)
-        self.workspace_panel.setVisible(sidebar_visible)
+        self._sidebar_requested = as_bool(self.settings.value("sidebar_visible", True), True)
+        section = str(self.settings.value("sidebar_section", "files"))
+        self.workspace_panel.show_section(section)
 
         sync_scroll = as_bool(self.settings.value("sync_preview_scroll_enabled", True), True)
         self.sync_preview_scroll_enabled = sync_scroll
         self.actions["sync_scroll"].setChecked(sync_scroll)
+        self.set_view_mode(str(self.settings.value("view_mode", "writing")))
+        self._apply_responsive_layout()
 
     def save_ui_settings(self) -> None:
         self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("main_splitter_sizes", self.main_splitter.sizes())
-        self.settings.setValue("editor_preview_splitter_sizes", self.editor_preview_splitter.sizes())
+        self.settings.setValue("main_splitter_sizes", [self._sidebar_width, max(1, self.main_splitter.width() - self._sidebar_width)])
+        if self.view_mode == "split":
+            self._remember_document_split()
+        self.settings.setValue("editor_preview_splitter_sizes", self._split_sizes)
+        self.settings.setValue("editor_preview_vertical_sizes", self._stack_sizes)
+        self.settings.setValue("view_mode", self.view_mode)
+        self.typography.save(self.settings)
+        self.settings.setValue("check_updates_on_startup", self.check_updates_on_startup)
         self.settings.setValue("theme", self.theme)
         self.settings.setValue("language", self.language)
         self.settings.setValue("autosave_enabled", self.autosave_enabled)
         self.settings.setValue("line_wrap", self.actions["wrap"].isChecked())
         self.settings.setValue("sync_preview_scroll_enabled", self.sync_preview_scroll_enabled)
-        self.settings.setValue("sidebar_visible", self.workspace_panel.isVisible())
+        self.settings.setValue("sidebar_visible", self._sidebar_requested)
+        self.settings.setValue("sidebar_section", self.workspace_panel.section)
         if self.workspace_dir:
             self.settings.setValue("workspace_dir", str(self.workspace_dir))
         if self.current_path:
@@ -662,13 +990,17 @@ class MainWindow(QMainWindow):
     def on_text_changed(self) -> None:
         if self._loading:
             return
-        self.schedule_preview_update()
-        self.update_outline()
-        self.update_current_tab_title()
-        self.update_window_title()
-        self.update_status()
-        if not self._loading and self.autosave_enabled:
-            self.autosave_timer.start()
+        editor = self.sender()
+        if not isinstance(editor, MarkdownEditor) or editor not in self.document_paths:
+            return
+        self.update_tab_title(editor)
+        if editor is self.editor:
+            self.schedule_preview_update()
+            self.update_outline()
+            self.update_window_title()
+            self.update_status()
+        if self.autosave_enabled:
+            self.document_autosave_timers[editor].start()
 
     def maybe_save(self) -> bool:
         if not self.editor.document().isModified():
@@ -714,7 +1046,7 @@ class MainWindow(QMainWindow):
 
         initial = f"# {candidate.stem.replace('-', ' ').title()}\n\n"
         try:
-            candidate.write_text(initial, encoding="utf-8", newline="\n")
+            write_text_atomic(candidate, initial)
         except OSError as exc:
             QMessageBox.critical(self, self.tr("note_create_error"), self.tr("note_create_error_body", error=exc))
             return
@@ -734,7 +1066,7 @@ class MainWindow(QMainWindow):
         self.open_file_path(Path(file_name))
 
     def open_file_path(self, path: Path, line_number: int | None = None) -> bool:
-        path = Path(path)
+        path = Path(path).resolve()
         if not path.exists():
             QMessageBox.warning(self, self.tr("file_not_found"), self.tr("file_not_found_body", path=path))
             self.remove_recent_path(path)
@@ -791,9 +1123,13 @@ class MainWindow(QMainWindow):
             path = path.with_suffix(".md")
         return self._write_markdown(path, autosave=False)
 
-    def _write_markdown(self, path: Path, *, autosave: bool) -> bool:
+    def _write_markdown(self, path: Path, *, autosave: bool, editor: MarkdownEditor | None = None) -> bool:
+        editor = editor if editor is not None else self.editor
         try:
-            path.write_text(self.editor.toPlainText(), encoding="utf-8", newline="\n")
+            path = path.resolve()
+            if any(other is not editor and opened == path for other, opened in self.document_paths.items()):
+                raise OSError(self.tr("save_path_in_use", path=path))
+            write_text_atomic(path, editor.toPlainText())
         except OSError as exc:
             if not autosave:
                 QMessageBox.critical(self, self.tr("save_error"), self.tr("save_error_body", error=exc))
@@ -801,13 +1137,16 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(self.tr("autosave_failed", error=exc), 3500)
             return False
 
-        self.set_current_path(path)
+        self.document_paths[editor] = path
         self.add_recent_path(path)
-        self.editor.document().setModified(False)
-        self.update_current_tab_title()
-        self.update_window_title()
-        self.update_preview()
-        self.update_status()
+        self.document_autosave_timers[editor].stop()
+        editor.document().setModified(False)
+        self.update_tab_title(editor)
+        if editor is self.editor:
+            self.current_path = path
+            self.update_window_title()
+            self.update_preview()
+            self.update_status()
         if autosave:
             self.statusBar().showMessage(self.tr("autosaved", name=path.name), 1800)
         else:
@@ -815,11 +1154,15 @@ class MainWindow(QMainWindow):
         return True
 
     def autosave_current_file(self) -> None:
-        if not self.autosave_enabled or self.current_path is None:
+        self.autosave_document(self.editor)
+
+    def autosave_document(self, editor: MarkdownEditor) -> None:
+        path = self.document_paths.get(editor)
+        if not self.autosave_enabled or path is None:
             return
-        if not self.editor.document().isModified():
+        if not editor.document().isModified():
             return
-        self._write_markdown(self.current_path, autosave=True)
+        self._write_markdown(path, autosave=True, editor=editor)
 
     def export_html(self) -> None:
         suggested = self.current_path.with_suffix(".html") if self.current_path else Path.home() / "documento.html"
@@ -847,6 +1190,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.tr("html_exported", name=path.name), 3500)
 
     def export_pdf(self) -> None:
+        if self.pdf_exporter.busy:
+            return
+        dialog = PdfOptionsDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
         suggested = self.current_path.with_suffix(".pdf") if self.current_path else Path.home() / "documento.pdf"
         file_name, _ = QFileDialog.getSaveFileName(
             self,
@@ -861,47 +1209,17 @@ class MainWindow(QMainWindow):
         if path.suffix == "":
             path = path.with_suffix(".pdf")
 
-        self._pending_pdf_path = path
-        self.update_preview()
+        options = dialog.options()
+        options.save(self.settings)
+        title = self.current_path.stem if self.current_path else APP_NAME
+        self.pdf_exporter.start(self.editor.toPlainText(), title, self.document_base_url(), path, options)
         self.statusBar().showMessage(self.tr("pdf_generation", name=path.name), 3500)
 
-    def wait_for_preview_before_pdf(self) -> None:
-        if not self._pending_pdf_path:
-            return
-
-        script = """
-(() => {
-  const hasMermaid = Boolean(document.querySelector("pre.mermaid, .mermaid[data-processed='true']"));
-  return !hasMermaid || Boolean(window.markdownStudioMermaidReady);
-})();
-"""
-        try:
-            self.preview.page().runJavaScript(script, self.print_pending_pdf_if_ready)
-        except RuntimeError:
-            self.print_pending_pdf_if_ready(True)
-
-    def print_pending_pdf_if_ready(self, ready) -> None:
-        path = self._pending_pdf_path
-        if not path:
-            return
-
-        if not ready and self._pending_pdf_retries < 50:
-            self._pending_pdf_retries += 1
-            QTimer.singleShot(100, self.wait_for_preview_before_pdf)
-            return
-
-        self._pending_pdf_path = None
-        self._pending_pdf_retries = 0
-        try:
-            self.preview.page().printToPdf(str(path))
-        except Exception as exc:
-            QMessageBox.critical(self, self.tr("export_pdf_error"), self.tr("export_pdf_error_body", error=exc))
-
-    def on_pdf_printing_finished(self, file_path: str, success: bool) -> None:
-        if success:
-            self.statusBar().showMessage(self.tr("pdf_exported", name=Path(file_path).name), 4500)
+    def on_pdf_export_finished(self, result: PdfResult) -> None:
+        if result.success:
+            self.statusBar().showMessage(self.tr("pdf_exported", name=result.path.name), 4500)
         else:
-            QMessageBox.warning(self, self.tr("pdf_not_generated"), self.tr("pdf_not_generated_body", path=file_path))
+            QMessageBox.warning(self, self.tr("pdf_not_generated"), self.tr(result.error, error=result.detail))
 
     def choose_workspace(self) -> None:
         start_dir = str(self.current_path.parent if self.current_path else self.workspace_dir or self.settings.value("last_dir", Path.home()))
@@ -963,14 +1281,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.tr("search_status", hits=len(hits), scanned=scanned, suffix=suffix), 5000)
 
     def focus_workspace_search(self) -> None:
-        if not self.workspace_panel.isVisible():
-            self.workspace_panel.setVisible(True)
-        self.workspace_panel.tabs.setCurrentWidget(self.workspace_panel.results_list)
+        self.show_sidebar_section("search", toggle=False)
         self.workspace_panel.search_box.setFocus()
         self.workspace_panel.search_box.selectAll()
 
     def toggle_sidebar(self) -> None:
-        self.workspace_panel.setVisible(not self.workspace_panel.isVisible())
+        self.show_sidebar_section(self.workspace_panel.section)
 
     def add_recent_path(self, path: Path) -> None:
         normalized = path.resolve() if path.exists() else path
@@ -1020,6 +1336,9 @@ class MainWindow(QMainWindow):
             editor = self.document_tabs.widget(index)
             if isinstance(editor, MarkdownEditor) and self.document_paths.get(editor) == path:
                 self.document_tabs.removeTab(index)
+                timer = self.document_autosave_timers.pop(editor, None)
+                if timer:
+                    timer.stop()
                 self.document_paths.pop(editor, None)
                 editor.deleteLater()
 
@@ -1035,188 +1354,19 @@ class MainWindow(QMainWindow):
 
     def update_preview(self) -> None:
         title = self.current_path.stem if self.current_path else APP_NAME
+        revision = self.scroll_sync.prepare(self.editor)
         html_doc = self.renderer.to_html_document(self.editor.toPlainText(), title=title)
+        html_doc = html_doc.replace('<html lang="it">', f'<html lang="it" data-preview-revision="{revision}">', 1)
 
-        if self.current_path:
-            base_url = QUrl.fromLocalFile(str(self.current_path.parent) + os.sep)
-        elif self.workspace_dir:
-            base_url = QUrl.fromLocalFile(str(self.workspace_dir) + os.sep)
-        else:
-            base_url = QUrl.fromLocalFile(str(Path.cwd()) + os.sep)
-
-        self.preview.setHtml(html_doc, base_url)
+        self.preview.setHtml(html_doc, self.document_base_url())
         self.schedule_preview_scroll_sync()
 
+    def document_base_url(self) -> QUrl:
+        directory = self.current_path.parent if self.current_path else self.workspace_dir or Path.cwd()
+        return QUrl.fromLocalFile(str(directory) + os.sep)
+
     def schedule_preview_scroll_sync(self) -> None:
-        if self.sync_preview_scroll_enabled and not self._syncing_editor_from_preview:
-            self.preview_scroll_timer.start()
-
-    def schedule_editor_scroll_sync_from_preview(self) -> None:
-        if self.sync_preview_scroll_enabled and not self._syncing_preview_from_editor:
-            self.editor_scroll_timer.start()
-
-    def sync_preview_scroll(self) -> None:
-        if not self.sync_preview_scroll_enabled:
-            return
-
-        text_lines = self.editor.toPlainText().splitlines() or [""]
-        total_lines = len(text_lines)
-        top_line = max(1, min(total_lines, self.editor.firstVisibleBlock().blockNumber() + 1))
-        line_ratio = 0.0 if total_lines <= 1 else (top_line - 1) / (total_lines - 1)
-        payload = {
-            "line": top_line,
-            "totalLines": total_lines,
-            "ratio": max(0.0, min(1.0, line_ratio)),
-        }
-
-        script = f"""
-(() => {{
-  const doc = document.documentElement;
-  const body = document.body;
-  const scrollHeight = Math.max(
-    doc ? doc.scrollHeight : 0,
-    body ? body.scrollHeight : 0
-  );
-  const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
-  const payload = {json.dumps(payload)};
-
-  const anchors = Array.from(document.querySelectorAll("[data-source-line]"))
-    .map((element) => {{
-      const line = Number(element.getAttribute("data-source-line"));
-      return {{
-        line,
-        y: element.getBoundingClientRect().top + window.scrollY,
-      }};
-    }})
-    .filter((anchor) => Number.isFinite(anchor.line) && Number.isFinite(anchor.y))
-    .sort((a, b) => a.line - b.line || a.y - b.y);
-
-  if (anchors.length) {{
-    const sourceLine = Math.max(1, Math.min(payload.totalLines || 1, payload.line || 1));
-    let previous = {{ line: 1, y: 0 }};
-    let next = {{ line: payload.totalLines || sourceLine, y: maxScroll }};
-
-    for (const anchor of anchors) {{
-      if (anchor.line <= sourceLine) {{
-        previous = anchor;
-      }} else {{
-        next = anchor;
-        break;
-      }}
-    }}
-
-    if (sourceLine <= anchors[0].line) {{
-      previous = {{ line: 1, y: 0 }};
-      next = anchors[0];
-    }} else if (sourceLine >= anchors[anchors.length - 1].line) {{
-      previous = anchors[anchors.length - 1];
-      next = {{ line: payload.totalLines || previous.line, y: maxScroll }};
-    }}
-
-    const lineSpan = Math.max(1, next.line - previous.line);
-    const progress = Math.max(0, Math.min(1, (sourceLine - previous.line) / lineSpan));
-    const target = previous.y + (next.y - previous.y) * progress;
-    window.scrollTo(0, Math.max(0, Math.min(maxScroll, target)));
-    return;
-  }}
-
-  window.scrollTo(0, maxScroll * (payload.ratio || 0));
-}})();
-"""
-        try:
-            self._syncing_preview_from_editor = True
-            self.preview.page().runJavaScript(script)
-            QTimer.singleShot(120, lambda: setattr(self, "_syncing_preview_from_editor", False))
-        except RuntimeError:
-            self._syncing_preview_from_editor = False
-            pass
-
-    def sync_editor_scroll_from_preview(self) -> None:
-        if not self.sync_preview_scroll_enabled or self._syncing_preview_from_editor:
-            return
-
-        script = """
-(() => {
-  const doc = document.documentElement;
-  const body = document.body;
-  const scrollTop = window.scrollY || (doc ? doc.scrollTop : 0) || (body ? body.scrollTop : 0) || 0;
-  const scrollHeight = Math.max(
-    doc ? doc.scrollHeight : 0,
-    body ? body.scrollHeight : 0
-  );
-  const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
-  const ratio = maxScroll <= 0 ? 0 : Math.max(0, Math.min(1, scrollTop / maxScroll));
-  const anchors = Array.from(document.querySelectorAll("[data-source-line]"))
-    .map((element) => {
-      const line = Number(element.getAttribute("data-source-line"));
-      return {
-        line,
-        y: element.getBoundingClientRect().top + window.scrollY,
-      };
-    })
-    .filter((anchor) => Number.isFinite(anchor.line) && Number.isFinite(anchor.y))
-    .sort((a, b) => a.line - b.line || a.y - b.y);
-
-  if (!anchors.length) {
-    return { mode: "ratio", ratio };
-  }
-
-  const viewportLine = scrollTop + 10;
-  let previous = { line: 1, y: 0 };
-  let next = null;
-  for (const anchor of anchors) {
-    if (anchor.y <= viewportLine) {
-      previous = anchor;
-    } else {
-      next = anchor;
-      break;
-    }
-  }
-  if (!next) {
-    next = { line: null, y: maxScroll };
-  }
-
-  const span = Math.max(1, next.y - previous.y);
-  const progress = Math.max(0, Math.min(1, (viewportLine - previous.y) / span));
-  return {
-    mode: "sourceLines",
-    previousLine: previous.line,
-    nextLine: next.line,
-    progress,
-    ratio,
-  };
-})();
-"""
-
-        try:
-            self.preview.page().runJavaScript(script, self.apply_preview_scroll_to_editor)
-        except RuntimeError:
-            pass
-
-    def apply_preview_scroll_to_editor(self, payload) -> None:
-        if not self.sync_preview_scroll_enabled or not isinstance(payload, dict):
-            return
-
-        text_lines = self.editor.toPlainText().splitlines() or [""]
-        total_lines = len(text_lines)
-
-        if payload.get("mode") == "sourceLines":
-            previous_line = int(payload.get("previousLine", 1) or 1)
-            next_line_value = payload.get("nextLine")
-            next_line = int(next_line_value) if next_line_value else total_lines
-            previous_line = max(1, min(total_lines, previous_line))
-            next_line = max(previous_line, min(total_lines, next_line))
-            progress = float(payload.get("progress", 0.0) or 0.0)
-            target_line = round(previous_line + (next_line - previous_line) * max(0.0, min(1.0, progress)))
-        else:
-            ratio = float(payload.get("ratio", 0.0) or 0.0)
-            target_line = round(1 + (total_lines - 1) * max(0.0, min(1.0, ratio)))
-
-        scrollbar = self.editor.verticalScrollBar()
-        target_value = max(0, min(scrollbar.maximum(), target_line - 1))
-        self._syncing_editor_from_preview = True
-        scrollbar.setValue(target_value)
-        QTimer.singleShot(120, lambda: setattr(self, "_syncing_editor_from_preview", False))
+        self.scroll_sync.schedule()
 
     def update_outline(self) -> None:
         headings: list[tuple[int, str, int]] = []
@@ -1243,14 +1393,17 @@ class MainWindow(QMainWindow):
         words = len(text.split()) if text.strip() else 0
         chars = len(text)
         read_minutes = max(1, round(words / 220)) if words else 0
-        workspace = self.tr("workspace_suffix", path=self.workspace_dir) if self.workspace_dir else ""
         self.status_label.setText(
-            self.tr("line_status", line=line, col=col, words=words, chars=chars, minutes=read_minutes)
+            self.tr("compact_status", line=line, col=col, words=words)
         )
+        self.status_label.setToolTip(self.tr("line_status", line=line, col=col, words=words, chars=chars, minutes=read_minutes))
         if self.current_path:
-            self.path_label.setText(f"{self.current_path}{workspace}")
+            state = self.tr("document_modified" if self.editor.document().isModified() else "document_saved")
+            self.path_label.setText(f"{self.current_path.name} · {state}")
+            self.path_label.setToolTip(str(self.current_path))
         else:
-            self.path_label.setText(self.tr("no_file_status", workspace=workspace))
+            self.path_label.setText(self.tr("unsaved_draft"))
+            self.path_label.setToolTip(self.tr("no_file_status", workspace=""))
 
     def goto_line(self, line_number: int) -> None:
         block = self.editor.document().findBlockByNumber(max(0, line_number - 1))
@@ -1385,6 +1538,78 @@ class MainWindow(QMainWindow):
                 pass
         return QUrl.fromLocalFile(str(path)).toString()
 
+    def set_view_mode(self, mode: str) -> None:
+        if mode not in {"writing", "split", "reading"}:
+            mode = "split"
+        if self.view_mode == "split":
+            self._remember_document_split()
+        self.view_mode = mode
+        self.editor_panel.setVisible(mode != "reading")
+        self.preview_panel.setVisible(mode != "writing")
+        if mode == "split":
+            self._restore_document_split()
+        for editor in self.document_paths:
+            editor.set_readable_width(mode == "writing")
+        for value, action in self.view_actions.items():
+            action.setChecked(value == mode)
+        for key in ("bold", "italic", "code", "code_block", "heading", "list", "quote", "link", "image", "table"):
+            self.actions[key].setEnabled(mode != "reading")
+        if mode == "reading":
+            self.hide_find_bar()
+            self.preview.setFocus()
+        else:
+            self.editor.setFocus()
+        self._apply_responsive_layout()
+        self.schedule_preview_scroll_sync()
+
+    def show_find_bar(self) -> None:
+        if self.view_mode == "reading":
+            self.set_view_mode("split")
+        selected = self.editor.textCursor().selectedText()
+        if selected and "\u2029" not in selected:
+            self.find_box.setText(selected)
+        self.find_bar.show()
+        self.close_find_action.setEnabled(True)
+        self.find_box.setFocus()
+        self.find_box.selectAll()
+
+    def hide_find_bar(self) -> None:
+        self.find_bar.hide()
+        self.close_find_action.setEnabled(False)
+        self.editor.setFocus()
+
+    def show_about(self) -> None:
+        version = html.escape(self.tr("about_version", version=VERSION))
+        author = html.escape(self.tr("about_author", author=APP_AUTHOR))
+        QMessageBox.about(
+            self, self.tr("about_title", name=APP_NAME),
+            f"<h3>{html.escape(APP_NAME)}</h3>"
+            f"<p>{version}<br>{author}</p>"
+            f"<p>{html.escape(APP_COPYRIGHT)}</p>",
+        )
+
+    def show_preferences(self) -> None:
+        dialog = PreferencesDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.typography = dialog.typography()
+        self.check_updates_on_startup = dialog.check_updates.isChecked()
+        if not self.check_updates_on_startup and not self._manual_update_check:
+            self.update_checker.cancel()
+        self.renderer.typography = self.typography
+        for editor in self.document_paths:
+            editor.apply_typography(self.typography.editor_font, self.typography.editor_size)
+        self.set_language(dialog.language.currentData())
+        self.apply_theme(dialog.theme.currentData())
+        for key, checked, handler in (
+            ("autosave", dialog.autosave.isChecked(), self.toggle_autosave),
+            ("wrap", dialog.wrap.isChecked(), self.toggle_line_wrap),
+            ("sync_scroll", dialog.sync.isChecked(), self.toggle_preview_scroll_sync),
+        ):
+            self.actions[key].setChecked(checked)
+            handler(checked)
+        self.save_ui_settings()
+
     def find_next(self) -> None:
         self.find_in_document(backward=False)
 
@@ -1392,6 +1617,8 @@ class MainWindow(QMainWindow):
         self.find_in_document(backward=True)
 
     def find_in_document(self, *, backward: bool) -> None:
+        if not self.find_bar.isVisible() or self.view_mode == "reading":
+            self.show_find_bar()
         text = self.find_box.text()
         if not text:
             return
@@ -1455,10 +1682,16 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(APP_THEME_QSS[self.theme])
         if hasattr(self, "actions"):
             self.update_theme_action_text()
+            self._apply_command_icons()
         self.update_preview()
 
     def toggle_autosave(self, checked: bool) -> None:
         self.autosave_enabled = checked
+        for editor, timer in self.document_autosave_timers.items():
+            if checked and editor.document().isModified():
+                timer.start()
+            else:
+                timer.stop()
         state = self.tr("enabled_m" if checked else "disabled_m")
         self.statusBar().showMessage(self.tr("autosave_state", state=state), 2500)
 
@@ -1470,8 +1703,7 @@ class MainWindow(QMainWindow):
     def toggle_preview_scroll_sync(self, checked: bool) -> None:
         self.sync_preview_scroll_enabled = checked
         state = self.tr("enabled_f" if checked else "disabled_f")
-        if checked:
-            self.schedule_preview_scroll_sync()
+        self.scroll_sync.align()
         self.statusBar().showMessage(self.tr("sync_state", state=state), 2500)
 
     def set_line_wrap(self, enabled: bool) -> None:
@@ -1480,6 +1712,7 @@ class MainWindow(QMainWindow):
             editor = self.document_tabs.widget(index)
             if isinstance(editor, MarkdownEditor):
                 editor.setLineWrapMode(mode)
+                editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff if enabled else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         for index in range(self.document_tabs.count()):
@@ -1488,4 +1721,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self.save_ui_settings()
+        self.update_checker.cancel()
+        self.pdf_exporter.cancel()
+        self.scroll_sync.timer.stop()
         event.accept()

@@ -8,12 +8,14 @@ try:
 except ImportError:
     from PyQt6.QtGui import QAction, QKeySequence
     from PyQt6.QtWidgets import QFileSystemModel
-from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QTabWidget, QTreeView, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QToolButton, QTreeView, QVBoxLayout, QWidget
 
 try:
     from .utils import SearchHit, is_markdown_file
+    from .ui_icons import ui_icon
 except ImportError:
     from utils import SearchHit, is_markdown_file
+    from ui_icons import ui_icon
 
 class WorkspacePanel(QWidget):
     """Sidebar containing workspace files, recent files and global search results."""
@@ -22,6 +24,10 @@ class WorkspacePanel(QWidget):
         super().__init__()
         self.main_window = main_window
         self.workspace_dir: Path | None = None
+        self.section = "files"
+        self.setObjectName("workspacePanel")
+        self.setMinimumWidth(190)
+        self.setMaximumWidth(300)
 
         self.model = QFileSystemModel(self)
         self.model.setNameFilters(["*.md", "*.markdown", "*.mdown", "*.mkd", "*.txt"])
@@ -29,45 +35,65 @@ class WorkspacePanel(QWidget):
         self.model.setReadOnly(False)
 
         self.root_label = QLabel("Workspace: —")
-        self.root_label.setWordWrap(True)
+        self.root_label.setWordWrap(False)
+        self.root_label.setMinimumWidth(0)
+        self.root_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.root_label.setObjectName("sidebarTitle")
 
-        self.choose_button = QPushButton("Cartella…")
+        self.choose_button = QToolButton()
         self.choose_button.clicked.connect(self.main_window.choose_workspace)
-        self.new_note_button = QPushButton("Nuova nota")
+        self.new_note_button = QToolButton()
         self.new_note_button.clicked.connect(self.main_window.new_note_in_workspace)
 
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.addWidget(self.choose_button)
-        buttons.addWidget(self.new_note_button)
+        header = QHBoxLayout()
+        header.setContentsMargins(12, 6, 8, 6)
+        header.addWidget(self.root_label, 1)
+        header.addWidget(self.new_note_button)
+        header.addWidget(self.choose_button)
+        header_widget = QWidget()
+        header_widget.setLayout(header)
+        header_widget.setFixedHeight(40)
 
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Cerca nel workspace…")
         self.search_box.returnPressed.connect(self.main_window.search_workspace)
+        self.search_box.setMinimumWidth(0)
+        self.search_box.setClearButtonEnabled(True)
         self.search_button = QPushButton("Cerca")
         self.search_button.clicked.connect(self.main_window.search_workspace)
         self.case_sensitive_box = QCheckBox("Maiuscole")
 
-        search_row = QHBoxLayout()
-        search_row.setContentsMargins(0, 0, 0, 0)
-        search_row.addWidget(self.search_box, 1)
-        search_row.addWidget(self.search_button)
-
-        self.tabs = QTabWidget()
+        self.tabs = QStackedWidget()
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setHeaderHidden(False)
+        self.tree.setAlternatingRowColors(False)
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_tree_context_menu)
         for column in range(1, 4):
             self.tree.hideColumn(column)
-        self.tabs.addTab(self.tree, "File")
+        self.file_page = QWidget()
+        file_layout = QVBoxLayout(self.file_page)
+        file_layout.setContentsMargins(6, 0, 6, 8)
+        file_layout.setSpacing(12)
+        self.empty_label = QLabel()
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setObjectName("emptyWorkspace")
+        self.empty_open_button = QPushButton()
+        self.empty_open_button.clicked.connect(self.main_window.choose_workspace)
+        file_layout.addWidget(self.empty_label)
+        file_layout.addWidget(self.empty_open_button)
+        file_layout.addWidget(self.tree, 1)
+        self.tabs.addWidget(self.file_page)
 
         self.rename_action = QAction("Rinomina", self)
         self.rename_action.setShortcut(QKeySequence("F2"))
@@ -83,51 +109,77 @@ class WorkspacePanel(QWidget):
 
         self.recent_list = QListWidget()
         self.recent_list.itemDoubleClicked.connect(self.on_recent_double_clicked)
-        self.tabs.addTab(self.recent_list, "Recenti")
+        self.tabs.addWidget(self.recent_list)
 
         self.results_list = QListWidget()
+        self.results_list.setWordWrap(True)
+        self.results_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.results_list.itemDoubleClicked.connect(self.on_result_double_clicked)
-        self.tabs.addTab(self.results_list, "Risultati")
+        self.search_page = QWidget()
+        search_layout = QVBoxLayout(self.search_page)
+        search_layout.setContentsMargins(10, 0, 10, 8)
+        search_layout.setSpacing(8)
+        search_layout.addWidget(self.search_box)
+        search_options = QHBoxLayout()
+        search_options.addWidget(self.case_sensitive_box, 1)
+        search_options.addWidget(self.search_button)
+        search_layout.addLayout(search_options)
+        search_layout.addWidget(self.results_list, 1)
+        self.tabs.addWidget(self.search_page)
 
         self.outline_list = QListWidget()
+        self.outline_list.setWordWrap(True)
+        self.outline_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.outline_list.itemDoubleClicked.connect(self.on_outline_double_clicked)
-        self.tabs.addTab(self.outline_list, "Outline")
+        self.tabs.addWidget(self.outline_list)
+        self.sections = {"files": self.file_page, "search": self.search_page, "recent": self.recent_list, "outline": self.outline_list}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.addWidget(self.root_label)
-        layout.addLayout(buttons)
-        layout.addLayout(search_row)
-        layout.addWidget(self.case_sensitive_box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(header_widget)
         layout.addWidget(self.tabs, 1)
+        self.apply_theme("#64748b")
 
     def set_workspace(self, path: Path | None) -> None:
-        self.workspace_dir = path if path and path.exists() else None
+        self.workspace_dir = path if path and path.is_dir() else None
         if self.workspace_dir:
             root_index = self.model.setRootPath(str(self.workspace_dir))
             self.tree.setRootIndex(root_index)
-            self.root_label.setText(self.main_window.tr("workspace_label", path=self.workspace_dir))
         else:
-            root_index = self.model.setRootPath(str(Path.home()))
-            self.tree.setRootIndex(root_index)
-            self.root_label.setText(self.main_window.tr("workspace_empty"))
+            self.model.setRootPath("")
+        self.tree.setVisible(self.workspace_dir is not None)
+        self.empty_label.setVisible(self.workspace_dir is None)
+        self.empty_open_button.setVisible(self.workspace_dir is None)
+        self.show_section(self.section)
+
+    def show_section(self, section: str) -> None:
+        if section not in self.sections:
+            return
+        self.section = section
+        self.tabs.setCurrentWidget(self.sections[section])
+        self.new_note_button.setVisible(section == "files")
+        self.choose_button.setVisible(section == "files")
+        title = self.workspace_dir.name or str(self.workspace_dir) if self.workspace_dir else self.main_window.tr("tab_file")
+        keys = {"search": "search", "outline": "tab_outline", "recent": "tab_recent"}
+        self.root_label.setText(title if section == "files" else self.main_window.tr(keys[section]))
+        self.root_label.setToolTip(str(self.workspace_dir) if self.workspace_dir and section == "files" else self.root_label.text())
+
+    def apply_theme(self, color: str) -> None:
+        self.choose_button.setIcon(ui_icon("folder", color))
+        self.new_note_button.setIcon(ui_icon("plus", color))
 
     def apply_language(self) -> None:
-        self.root_label.setText(
-            self.main_window.tr("workspace_label", path=self.workspace_dir)
-            if self.workspace_dir
-            else self.main_window.tr("workspace_empty")
-        )
-        self.choose_button.setText(self.main_window.tr("folder"))
-        self.new_note_button.setText(self.main_window.tr("new_note"))
+        self.show_section(self.section)
+        self.choose_button.setToolTip(self.main_window.tr("open_workspace"))
+        self.choose_button.setAccessibleName(self.main_window.tr("open_workspace"))
+        self.new_note_button.setToolTip(self.main_window.tr("new_note"))
+        self.new_note_button.setAccessibleName(self.main_window.tr("new_note"))
+        self.empty_label.setText(self.main_window.tr("workspace_welcome"))
+        self.empty_open_button.setText(self.main_window.tr("open_folder"))
         self.search_box.setPlaceholderText(self.main_window.tr("search_workspace_placeholder"))
         self.search_button.setText(self.main_window.tr("search"))
         self.case_sensitive_box.setText(self.main_window.tr("case_sensitive"))
-        self.tabs.setTabText(self.tabs.indexOf(self.tree), self.main_window.tr("tab_file"))
-        self.tabs.setTabText(self.tabs.indexOf(self.recent_list), self.main_window.tr("tab_recent"))
-        self.tabs.setTabText(self.tabs.indexOf(self.results_list), self.main_window.tr("tab_results"))
-        self.tabs.setTabText(self.tabs.indexOf(self.outline_list), self.main_window.tr("tab_outline"))
         self.rename_action.setText(self.main_window.tr("rename"))
         self.delete_action.setText(self.main_window.tr("delete"))
 
@@ -148,11 +200,11 @@ class WorkspacePanel(QWidget):
                 display_path = hit.path.relative_to(workspace_dir) if workspace_dir else hit.path
             except ValueError:
                 display_path = hit.path
-            item = QListWidgetItem(f"{display_path}:{hit.line_number} — {hit.snippet}")
+            item = QListWidgetItem(f"{display_path}:{hit.line_number}\n{hit.snippet}")
             item.setToolTip(str(hit.path))
             item.setData(Qt.ItemDataRole.UserRole, {"path": str(hit.path), "line": hit.line_number})
             self.results_list.addItem(item)
-        self.tabs.setCurrentWidget(self.results_list)
+        self.main_window.show_sidebar_section("search", toggle=False)
 
     def update_outline(self, headings: list[tuple[int, str, int]]) -> None:
         self.outline_list.clear()
@@ -177,7 +229,8 @@ class WorkspacePanel(QWidget):
                 self.tree.expand(index)
             return
         if is_markdown_file(path):
-            self.main_window.open_file_path(path)
+            if self.main_window.open_file_path(path):
+                self.main_window.dismiss_compact_sidebar()
 
     def open_tree_context_menu(self, position) -> None:
         index = self.tree.indexAt(position)
@@ -196,7 +249,8 @@ class WorkspacePanel(QWidget):
         delete_action = menu.addAction(self.main_window.tr("delete"))
         chosen = menu.exec(self.tree.viewport().mapToGlobal(position))
         if chosen == open_action:
-            self.main_window.open_file_path(path)
+            if self.main_window.open_file_path(path):
+                self.main_window.dismiss_compact_sidebar()
         elif chosen == rename_action:
             self.rename_file(path)
         elif chosen == delete_action:
@@ -304,14 +358,17 @@ class WorkspacePanel(QWidget):
 
     def on_recent_double_clicked(self, item: QListWidgetItem) -> None:
         path = Path(str(item.data(Qt.ItemDataRole.UserRole)))
-        self.main_window.open_file_path(path)
+        if self.main_window.open_file_path(path):
+            self.main_window.dismiss_compact_sidebar()
 
     def on_result_double_clicked(self, item: QListWidgetItem) -> None:
         payload = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(payload, dict):
-            self.main_window.open_file_path(Path(payload["path"]), line_number=int(payload.get("line", 1)))
+            if self.main_window.open_file_path(Path(payload["path"]), line_number=int(payload.get("line", 1))):
+                self.main_window.dismiss_compact_sidebar()
 
     def on_outline_double_clicked(self, item: QListWidgetItem) -> None:
         line_number = item.data(Qt.ItemDataRole.UserRole)
         if line_number:
             self.main_window.goto_line(int(line_number))
+            self.main_window.dismiss_compact_sidebar()
